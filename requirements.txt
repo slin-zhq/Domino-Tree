@@ -1,0 +1,13 @@
+# Install a CUDA-compatible torch build separately if needed.
+torch
+transformers>=4.51.0
+datasets>=2.18.0
+numpy
+tqdm
+rich
+loguru
+accelerate
+safetensors
+huggingface_hub
+typing_extensions
+triton; platform_system == "Linux"
