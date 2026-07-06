@@ -37,6 +37,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--node-topk", type=int, default=8)
     parser.add_argument("--corr-topm", type=int, default=64, help="DominoTree correction candidate set size; 0 = full vocab.")
     parser.add_argument(
+        "--sample-draft",
+        action="store_true",
+        help=(
+            "Temperature-sample the draft like released Domino instead of greedy argmax / "
+            "deterministic top-k. Applies to all Domino methods: the 'chain' draft tokens and the "
+            "'marg'/'dominotree' tree candidate sets. OFF by default so the greedy-draft/sampled-target "
+            "convention stays matched with the DDTree/CaDDTree baselines (which use a deterministic "
+            "draft). Lossless either way; sampling the draft only lowers acceptance (a parity/exploration "
+            "option, not a throughput lever). No effect at temperature<1e-5."
+        ),
+    )
+    parser.add_argument(
         "--methods",
         default="chain,marg,dominotree",
         help="Subset of {ar,chain,marg,dominotree}; dominotree is the conditional draft tree (this paper's method), marg is the marginal-tree DDTree-analogue.",
@@ -54,6 +66,9 @@ def main() -> None:
     unknown = sorted(set(methods) - allowed)
     if unknown:
         raise SystemExit(f"unknown methods: {unknown}; allowed={sorted(allowed)}")
+
+    if args.sample_draft and args.temperature < 1e-5:
+        print("[info] --sample-draft has no effect at temperature<1e-5 (sampling reduces to argmax).")
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
@@ -177,6 +192,7 @@ def main() -> None:
                     temperature=args.temperature,
                     device=device,
                     cuda_t=cuda_t,
+                    sample_draft=args.sample_draft,
                 )
                 start += acc_len + 1
                 for stage, value in stage_ms.items():
@@ -184,7 +200,13 @@ def main() -> None:
             else:
                 t0 = cuda_t()
                 if mode == "marg":
-                    children_fn = domino_adapter.make_marginal_children_fn(base_logits, k_draft, args.node_topk)
+                    children_fn = domino_adapter.make_marginal_children_fn(
+                        base_logits,
+                        k_draft,
+                        args.node_topk,
+                        sample_draft=args.sample_draft,
+                        temperature=args.temperature,
+                    )
                     root_state_for_tree = None
                 else:
                     children_fn = domino_adapter.make_conditional_children_fn(
@@ -197,6 +219,8 @@ def main() -> None:
                         node_topk=args.node_topk,
                         corr_topm=args.corr_topm,
                         device=device,
+                        sample_draft=args.sample_draft,
+                        temperature=args.temperature,
                     )
                     root_state_for_tree = root_state
                 nodes = dominotree.build_best_first_tree(children_fn, root_state_for_tree, budget, k_draft)
