@@ -35,11 +35,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--budgets", default="16", help="Comma-separated tree budgets for tree methods.")
     parser.add_argument("--node-topk", type=int, default=8)
-    parser.add_argument("--corr-topm", type=int, default=64, help="Cond correction candidate set size; 0 = full vocab.")
+    parser.add_argument("--corr-topm", type=int, default=64, help="DominoTree correction candidate set size; 0 = full vocab.")
     parser.add_argument(
         "--methods",
-        default="chain,marg,cond",
-        help="Subset of {ar,chain,marg,cond}; marg is the marginal-tree DDTree-analogue.",
+        default="chain,marg,dominotree",
+        help="Subset of {ar,chain,marg,dominotree}; dominotree is the conditional draft tree (this paper's method), marg is the marginal-tree DDTree-analogue.",
     )
     parser.add_argument("--out", required=True, help="Output JSONL path.")
     parser.add_argument("--smoke", action="store_true")
@@ -50,7 +50,7 @@ def main() -> None:
     args = parse_args()
     budgets = [int(b) for b in args.budgets.split(",") if b.strip()]
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
-    allowed = {"ar", "chain", "marg", "cond"}
+    allowed = {"ar", "chain", "marg", "dominotree"}
     unknown = sorted(set(methods) - allowed)
     if unknown:
         raise SystemExit(f"unknown methods: {unknown}; allowed={sorted(allowed)}")
@@ -104,9 +104,9 @@ def main() -> None:
         return time.perf_counter()
 
     @torch.inference_mode()
-    def generate(input_ids, mode: str, budget: int, sample_idx: int):
+    def generate(input_ids, mode: str, budget: int, sample_idx: int, max_new_override=None):
         num_input = input_ids.shape[1]
-        max_length = num_input + args.max_new_tokens
+        max_length = num_input + (max_new_override or args.max_new_tokens)
         extra = block_size + 1 if shift_label else block_size
         output_ids = torch.full((1, max_length + extra), mask_token_id, dtype=torch.long, device=device)
         position_ids = torch.arange(output_ids.shape[1], device=device).unsqueeze(0)
@@ -126,7 +126,7 @@ def main() -> None:
 
         start = num_input
         accepts: list[int] = []
-        times = {"draft": 0.0, "build": 0.0, "verify": 0.0, "commit": 0.0, "chain": 0.0}
+        times = {"draft": 0.0, "build": 0.0, "verify": 0.0, "commit": 0.0}
         t_decode = cuda_t()
 
         while start < max_length:
@@ -141,8 +141,6 @@ def main() -> None:
                 start += 1
                 accepts.append(1)
                 if eos is not None and eos in output_ids[0, num_input:start].tolist():
-                    break
-                if args.smoke and len(accepts) >= 6:
                     break
                 continue
 
@@ -161,8 +159,7 @@ def main() -> None:
             times["draft"] += cuda_t() - t0
 
             if mode == "chain":
-                t0 = cuda_t()
-                acc_len, target_hidden = domino_adapter.verify_domino_chain(
+                acc_len, target_hidden, stage_ms = domino_adapter.verify_domino_chain(
                     target=target,
                     draft=draft,
                     sample=sample,
@@ -179,9 +176,11 @@ def main() -> None:
                     layer_ids=layer_ids,
                     temperature=args.temperature,
                     device=device,
+                    cuda_t=cuda_t,
                 )
                 start += acc_len + 1
-                times["chain"] += cuda_t() - t0
+                for stage, value in stage_ms.items():
+                    times[stage] += value
             else:
                 t0 = cuda_t()
                 if mode == "marg":
@@ -246,8 +245,6 @@ def main() -> None:
             accepts.append(acc_len + 1)
             if eos is not None and eos in output_ids[0, num_input:start].tolist():
                 break
-            if args.smoke and len(accepts) >= 4:
-                break
 
         decode_time = cuda_t() - t_decode
         reported_end = min(start, max_length)
@@ -264,6 +261,21 @@ def main() -> None:
             runs.append((method, None))
         else:
             runs.extend((method, budget) for budget in budgets)
+
+    # Warmup, matching the DDTree/CaDDTree/DFlash benchmark SOP: run each method
+    # once on a short "Warmup" prompt so all CUDA kernels/caches are hot before any
+    # timing. Every measured prompt is then warm from the start, so we take a plain
+    # mean over all prompts with no warmup-row trimming (same as the references).
+    warmup_text = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "Warmup"}],
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+    warmup_ids = tokenizer.encode(warmup_text, return_tensors="pt").to(device)
+    warmup_tokens = min(args.max_new_tokens, 16)
+    for mode, budget in runs:
+        generate(warmup_ids, mode, budget or 0, 0, max_new_override=warmup_tokens)
 
     records = []
     t_start = time.time()
@@ -315,19 +327,25 @@ def main() -> None:
         for rec in records:
             f.write(json.dumps(rec) + "\n")
 
-    print(f"\n[benchmark] {len(records)} runs in {time.time() - t_start:.1f}s -> {args.out}\n")
-    print(f"{'method':>10} {'TPS':>7} {'tok/rnd':>8} | per-round ms: {'draft':>6} {'build':>6} {'verify':>6} {'commit':>6} {'chain':>6} {'n':>4}")
-    print("-" * 84)
+    print(f"\n[benchmark] {len(records)} runs in {time.time() - t_start:.1f}s -> {args.out}")
+    if args.smoke:
+        print("[smoke] Same warmup + process as a full run, but only a couple of prompts, so TPS is")
+        print("[smoke] noisy (small sample). Accept-length and out_sig are reliable; for stable,")
+        print("[smoke] comparable throughput run the full protocol (no --smoke, more prompts).")
+    print("\nPer-round stage times are in milliseconds (shown after the '|').")
+    print(f"{'method':>13} {'TPS':>7} {'tok/rnd':>8} | {'draft':>6} {'build':>6} {'verify':>6} {'commit':>6} {'total':>6} {'n':>4}")
+    print("-" * 72)
     for mode, budget in runs:
         label = mode if budget is None else f"{mode}@{budget}"
         rows = [rec for rec in records if rec["method"] == label]
         if not rows:
             continue
         avg = lambda key: statistics.fmean(rec.get(key, 0.0) for rec in rows)
+        total = avg("ms_draft") + avg("ms_build") + avg("ms_verify") + avg("ms_commit")
         print(
-            f"{label:>10} {avg('tps'):>7.1f} {avg('mean_accept'):>8.3f} | "
+            f"{label:>13} {avg('tps'):>7.1f} {avg('mean_accept'):>8.3f} | "
             f"{avg('ms_draft'):>6.2f} {avg('ms_build'):>6.2f} {avg('ms_verify'):>6.2f} "
-            f"{avg('ms_commit'):>6.2f} {avg('ms_chain'):>6.2f} {len(rows):>4}"
+            f"{avg('ms_commit'):>6.2f} {total:>6.2f} {len(rows):>4}"
         )
 
 

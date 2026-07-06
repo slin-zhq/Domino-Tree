@@ -6,7 +6,7 @@ user's cloned Domino repository, and this adapter only calls the passed-in
 
 It implements DominoTree's Domino-facing pieces:
 
-* the path-dependent per-node GRU correction used by Cond,
+* the path-dependent per-node GRU correction used by DominoTree,
 * the marginal children function for the DDTree-analogue control,
 * one draft-block forward,
 * the corrected chain verifier,
@@ -95,7 +95,7 @@ def make_conditional_children_fn(
     corr_topm: int,
     device,
 ):
-    """Return the Cond children function.
+    """Return the DominoTree (conditional) children function.
 
     For depths before Domino's pure-draft prefix, this uses backbone/base logits.
     After that, it applies Domino's GRU correction for each node state. When
@@ -157,11 +157,22 @@ def verify_domino_chain(
     layer_ids,
     temperature: float,
     device,
+    cuda_t,
 ):
-    """Run Domino's published corrected chain verifier for one round."""
+    """Run Domino's published corrected chain verifier for one round.
+
+    Returns ``(acc, target_hidden, stage_ms)``. ``stage_ms`` splits the round
+    into the same ``build``/``verify``/``commit`` stages the tree path reports,
+    with identical boundaries, so every method is timed the same way:
+    ``build`` is the sequential GRU-correction that constructs the chain,
+    ``verify`` is the single target forward, and ``commit`` is the acceptance
+    check plus KV/output write. ``cuda_t`` is the caller's timer (it must
+    synchronize the device before reading the clock).
+    """
 
     import torch
 
+    t0 = cuda_t()
     root_token_id = output_ids[0, start].item()
     verify_ids = torch.full((1, k_draft + 1), mask_token_id, dtype=torch.long, device=device)
     verify_ids[0, 0] = root_token_id
@@ -175,7 +186,9 @@ def verify_domino_chain(
         verify_ids[0, i + 1] = token_i
         if i + 1 < k_draft:
             _, state = draft.prefix_gru(target.model.embed_tokens(token_i.view(1, 1)), state)
+    build_ms = cuda_t() - t0
 
+    t0 = cuda_t()
     vout = target(
         verify_ids,
         position_ids=position_ids[:, start : start + k_draft + 1],
@@ -183,10 +196,14 @@ def verify_domino_chain(
         use_cache=True,
         output_hidden_states=True,
     )
+    verify_ms = cuda_t() - t0
+
+    t0 = cuda_t()
     post = sample(vout.logits, temperature)
     acc = (verify_ids[:, 1:] == post[:, :-1]).cumprod(dim=1).sum(dim=1)[0].item()
     output_ids[:, start : start + acc + 1] = verify_ids[:, : acc + 1]
     output_ids[:, start + acc + 1] = post[:, acc]
     past_kv.crop(start + acc + 1)
     target_hidden = extract_context_feature(vout.hidden_states, layer_ids)[:, : acc + 1, :]
-    return acc, target_hidden
+    commit_ms = cuda_t() - t0
+    return acc, target_hidden, {"build": build_ms, "verify": verify_ms, "commit": commit_ms}

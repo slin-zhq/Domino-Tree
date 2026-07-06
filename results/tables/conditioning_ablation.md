@@ -1,10 +1,10 @@
-# Conditioning Ablation: Cond@16 vs marginal tree (DDTree-analogue)@16
+# Conditioning Ablation: DominoTree (16) vs marginal tree (DDTree-analogue)@16
 
-Matched-budget T=0.0 comparison using public JSONL records. Cond rows come from `raw/dominotree/*_T0.0.jsonl`; marginal-tree rows come from `raw/conditioning_ablation/*_T0.0.jsonl`.
+Matched-budget T=0.0 comparison using public JSONL records. DominoTree rows come from `raw/dominotree/*_T0.0.jsonl`; marginal-tree rows come from `raw/conditioning_ablation/*_T0.0.jsonl`.
 
-Speedup is relative to AR rows from the same DominoTree file. Delta is `Cond speedup / marginal-tree speedup - 1`; 95% CIs are paired bootstraps.
+Speedup is relative to AR rows from the same DominoTree file. Delta is `DominoTree speedup / marginal-tree speedup - 1`; 95% CIs are paired bootstraps.
 
-| Dataset / Rollup | Cond speedup | Cond tau | marginal tree (DDTree-analogue) speedup | marginal tree (DDTree-analogue) tau | Delta Cond vs marginal tree (95% CI) | n pairs |
+| Dataset / Rollup | DominoTree speedup | DominoTree tau | marginal tree (DDTree-analogue) speedup | marginal tree (DDTree-analogue) tau | Delta DominoTree vs marginal tree (95% CI) | n pairs |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | GSM8K | 6.31 | 10.72 | 5.84 | 9.35 | +8.1% [+6.0, +10.4] | 50 |
 | MATH-500 | 5.59 | 9.77 | 5.14 | 8.68 | +8.8% [+6.3, +11.5] | 50 |

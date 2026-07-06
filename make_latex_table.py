@@ -48,7 +48,7 @@ TABLE1_METHODS = [
     ("baseline_ddtree_caddtree", "ddtree_tb16", "DDTree@16"),
     ("baseline_ddtree_caddtree", "caddtree", "CaDDTree"),
     ("dominotree", "chain", "Domino-chain"),
-    ("dominotree", "cond@16", "DominoTree cond@16"),
+    ("dominotree", "dominotree@16", "DominoTree (16)"),
 ]
 
 
@@ -88,7 +88,15 @@ def load_dominotree(raw_dir: Path, dataset: str, temp: str) -> dict[str, list[di
     override = raw_dir / "dominotree_recollected" / f"{dataset}_T{temp}.jsonl"
     path = override if override.exists() else raw_dir / "dominotree" / f"{dataset}_T{temp}.jsonl"
     grouped = group_by_method(read_jsonl(path))
-    # Match the paper script: drop the first execution row per method for DominoTree rows.
+    # Warmup-row exclusion: drop the first execution row per method. These frozen
+    # records were collected by the earlier harness, which did NOT run an in-loop
+    # warmup prompt, so the first prompt of each method pays the cold-start cost
+    # (one-time CUDA kernel compilation, cache/allocator warmup). Excluding it is
+    # methodologically equivalent to the warmup prompt the reference DDTree/CaDDTree
+    # benchmarks run before timing (and that benchmark.py now also runs): both
+    # average over warm prompts only. We keep the exclusion here so these tables
+    # reproduce the paper's numbers exactly; a fresh run from the warmup-enabled
+    # benchmark.py is already warm from prompt 1 and would not need it.
     return {method: sorted(rows, key=lambda r: r["_exec_idx"])[1:] for method, rows in grouped.items()}
 
 
@@ -178,50 +186,55 @@ def write_table1(data: dict[str, Any], temps: list[str], out_dir: Path, model_la
         writer.writerows(csv_rows)
 
 
-def write_table2(data: dict[str, Any], temps: list[str], out_dir: Path) -> None:
+def write_table2(data: dict[str, Any], temps: list[str], out_dir: Path, raw_dir: Path) -> None:
+    # Both methods are instrumented with identical stage boundaries. DominoTree's split comes from the
+    # main sweep (raw/dominotree). Domino-chain's split comes from a dedicated instrumented run
+    # (raw/chain_stage_timing), because the chain's original code path timed all post-draft work as one
+    # fused block. Both were collected without an in-loop warmup prompt, so below we drop the first row
+    # per dataset -- the same warmup-row exclusion as load_dominotree (see the rationale there): it
+    # removes the cold-start prompt, equivalent to the reference/benchmark.py warmup prompt.
+    def pooled(rows_by_dataset: list[list[dict[str, Any]]]) -> dict[str, float]:
+        pooled_rows: list[dict[str, Any]] = []
+        for rows in rows_by_dataset:
+            pooled_rows.extend(rows)
+        m = aggregate(pooled_rows)
+        m["ms_total"] = m["ms_draft"] + m["ms_build"] + m["ms_verify"] + m["ms_commit"]
+        m["n"] = len(pooled_rows)
+        return m
+
+    dtree = pooled([data["0.0"][ds]["dominotree"]["dominotree@16"] for ds in DATASETS])
+    chain = pooled([read_jsonl(raw_dir / "chain_stage_timing" / f"{ds}_T0.0.jsonl")[1:] for ds in DATASETS])
+
+    def row(label: str, m: dict[str, float]) -> str:
+        return (
+            f"| {label} | {fmt(m['ms_draft'])} | {fmt(m['ms_build'])} | {fmt(m['ms_verify'])} "
+            f"| {fmt(m['ms_commit'])} | {fmt(m['ms_total'])} | {int(m['n'])} |"
+        )
+
     lines = [
         "# Table 2: Per-round stage time",
         "",
-        "Stage times are mean milliseconds per decoding round from our harness after warmup-row exclusion.",
+        "Mean milliseconds per decoding round, our harness, Overall across all eight datasets at T=0,",
+        "after warmup-row exclusion. Stage times are temperature-invariant (each stage varies <2% across",
+        "T in {0, 0.5, 1.0}), so we report T=0. Both methods use identical stage boundaries: `build` is",
+        "drafter-side candidate construction (the sequential GRU-correction pass for Domino-chain;",
+        "best-first tree construction plus attention-mask assembly for DominoTree), `verify` is the single",
+        "target forward, `commit` is the acceptance check plus KV/output write, and `total` is their sum.",
+        "Domino-chain's stage split is from a dedicated instrumented run (`results/raw/chain_stage_timing/`),",
+        "because the chain's original code path timed all post-draft work as one fused block.",
         "",
-        "| Temp | Dataset | Method | draft ms | build ms | verify ms | commit ms | chain ms | n |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Method | draft ms | build ms | verify ms | commit ms | total/round ms | n |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        row("Domino-chain", chain),
+        row("DominoTree (16)", dtree),
     ]
-    csv_rows = []
-    for temp in temps:
-        for dataset in DATASETS + ["Overall"]:
-            for method, label in [("chain", "Domino-chain"), ("cond@16", "DominoTree cond@16")]:
-                rows = []
-                if dataset == "Overall":
-                    for ds in DATASETS:
-                        rows.extend(data[temp][ds]["dominotree"][method])
-                else:
-                    rows = data[temp][dataset]["dominotree"][method]
-                metric = aggregate(rows)
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            temp,
-                            LABELS.get(dataset, dataset),
-                            label,
-                            fmt(metric["ms_draft"]),
-                            fmt(metric["ms_build"]),
-                            fmt(metric["ms_verify"]),
-                            fmt(metric["ms_commit"]),
-                            fmt(metric["ms_chain"]),
-                            str(int(metric["n"])),
-                        ]
-                    )
-                    + " |"
-                )
-                csv_rows.append({"temp": temp, "dataset": dataset, "method": label, **metric, "n": int(metric["n"])})
     (out_dir / "table2.md").write_text("\n".join(lines).rstrip() + "\n")
     with (out_dir / "table2_stage_time.csv").open("w", newline="") as f:
-        keys = ["temp", "dataset", "method", "ms_draft", "ms_build", "ms_verify", "ms_commit", "ms_chain", "n"]
+        keys = ["method", "ms_draft", "ms_build", "ms_verify", "ms_commit", "ms_total", "n"]
         writer = csv.DictWriter(f, fieldnames=keys)
         writer.writeheader()
-        writer.writerows({k: row[k] for k in keys} for row in csv_rows)
+        for label, m in [("Domino-chain", chain), ("DominoTree (16)", dtree)]:
+            writer.writerow({"method": label, **{k: m[k] for k in keys if k != "method"}})
 
 
 def keyed(rows: list[dict[str, Any]], value_key: str) -> dict[int, float]:
@@ -258,9 +271,9 @@ def pairwise_units(data: dict[str, Any], temp: str, dataset: str, comparison: st
     dominotree = data[temp][dataset]["dominotree"]
     baseline = data[temp][dataset]["baseline_ddtree_caddtree"]
     if comparison == "chain":
-        left, right = keyed(dominotree["cond@16"], "tps"), keyed(dominotree["chain"], "tps")
+        left, right = keyed(dominotree["dominotree@16"], "tps"), keyed(dominotree["chain"], "tps")
     else:
-        left = speedup_by_exec(dominotree["cond@16"], dominotree["ar"])
+        left = speedup_by_exec(dominotree["dominotree@16"], dominotree["ar"])
         baseline_method = "ddtree_tb16" if comparison == "ddtree_tb16" else "caddtree"
         right = speedup_by_exec(baseline[baseline_method], baseline["baseline"])
     return [(left[idx], right[idx]) for idx in sorted(set(left) & set(right))]
@@ -269,15 +282,15 @@ def pairwise_units(data: dict[str, Any], temp: str, dataset: str, comparison: st
 def write_pairwise(data: dict[str, Any], temps: list[str], out_dir: Path, bootstrap_iters: int, seed: int) -> None:
     rng = random.Random(seed)
     comparisons = [
-        ("chain", "DominoTree cond@16 vs Domino-chain", "raw per-prompt TPS (same harness)"),
-        ("ddtree_tb16", "DominoTree cond@16 vs DDTree@16", "speedup-over-own-AR (cross harness)"),
-        ("caddtree", "DominoTree cond@16 vs CaDDTree", "speedup-over-own-AR (cross harness)"),
+        ("chain", "DominoTree (16) vs Domino-chain", "raw per-prompt TPS (same harness)"),
+        ("ddtree_tb16", "DominoTree (16) vs DDTree@16", "speedup-over-own-AR (cross harness)"),
+        ("caddtree", "DominoTree (16) vs CaDDTree", "speedup-over-own-AR (cross harness)"),
     ]
     row_groups = [(LABELS[d], [d]) for d in DATASETS] + [(name, datasets) for name, datasets in GROUPS.items()]
     lines = [
         "# Pairwise delta with 95% paired bootstrap CI",
         "",
-        "Delta is `100 * (mean(DominoTree cond@16 metric) / mean(baseline metric) - 1)`. Bootstrap resamples paired prompt rows.",
+        "Delta is `100 * (mean(DominoTree (16) metric) / mean(baseline metric) - 1)`. Bootstrap resamples paired prompt rows.",
         "",
         "| Temp | Dataset/Rollup | Comparison | Metric | N | Delta % | 95% CI |",
         "| --- | --- | --- | --- | ---: | ---: | --- |",
@@ -316,7 +329,7 @@ def write_conditioning_ablation_table(raw_dir: Path, out_dir: Path, bootstrap_it
         dominotree_rows = read_jsonl(raw_dir / "dominotree" / f"{dataset}_T0.0.jsonl")
         marginal_rows = read_jsonl(ablation_dir / f"{dataset}_T0.0.jsonl")
         ar_map = by_pair(dominotree_rows, "ar")
-        cond_map = by_pair(dominotree_rows, "cond@16")
+        cond_map = by_pair(dominotree_rows, "dominotree@16")
         marg_map = by_pair(marginal_rows, "marg@16")
         keys = sorted(set(ar_map) & set(cond_map) & set(marg_map))
         return [
@@ -378,13 +391,13 @@ def write_conditioning_ablation_table(raw_dir: Path, out_dir: Path, bootstrap_it
     rows += [(f"{name} Avg", datasets) for name, datasets in GROUPS.items()]
 
     lines = [
-        "# Conditioning Ablation: Cond@16 vs marginal tree (DDTree-analogue)@16",
+        "# Conditioning Ablation: DominoTree (16) vs marginal tree (DDTree-analogue)@16",
         "",
-        "Matched-budget T=0.0 comparison using public JSONL records. Cond rows come from `raw/dominotree/*_T0.0.jsonl`; marginal-tree rows come from `raw/conditioning_ablation/*_T0.0.jsonl`.",
+        "Matched-budget T=0.0 comparison using public JSONL records. DominoTree rows come from `raw/dominotree/*_T0.0.jsonl`; marginal-tree rows come from `raw/conditioning_ablation/*_T0.0.jsonl`.",
         "",
-        "Speedup is relative to AR rows from the same DominoTree file. Delta is `Cond speedup / marginal-tree speedup - 1`; 95% CIs are paired bootstraps.",
+        "Speedup is relative to AR rows from the same DominoTree file. Delta is `DominoTree speedup / marginal-tree speedup - 1`; 95% CIs are paired bootstraps.",
         "",
-        "| Dataset / Rollup | Cond speedup | Cond tau | marginal tree (DDTree-analogue) speedup | marginal tree (DDTree-analogue) tau | Delta Cond vs marginal tree (95% CI) | n pairs |",
+        "| Dataset / Rollup | DominoTree speedup | DominoTree tau | marginal tree (DDTree-analogue) speedup | marginal tree (DDTree-analogue) tau | Delta DominoTree vs marginal tree (95% CI) | n pairs |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     clear = []
@@ -418,7 +431,7 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     data = collect_data(args.raw_dir, temps)
     write_table1(data, temps, args.out_dir, args.model_label)
-    write_table2(data, temps, args.out_dir)
+    write_table2(data, temps, args.out_dir, args.raw_dir)
     write_pairwise(data, temps, args.out_dir, args.bootstrap_iters, args.seed)
     write_conditioning_ablation_table(args.raw_dir, args.out_dir, args.conditioning_ablation_bootstrap_iters)
     manifest = {

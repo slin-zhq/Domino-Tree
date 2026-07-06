@@ -3,8 +3,8 @@
 The key invariant is that the same best-first heap builder is used for both:
 
 * marg: a DDTree analogue whose children distribution depends only on depth.
-* cond: a DominoTree scorer whose children distribution is supplied by a
-  path-dependent Domino GRU-correction callback.
+* dominotree: the conditional scorer (this paper's method) whose children
+  distribution is supplied by a path-dependent Domino GRU-correction callback.
 
 This file intentionally excludes the experimental/deferred builders from the
 research branch (beam, wave/condwave, hybrid, condadaptive, and CUDA/star

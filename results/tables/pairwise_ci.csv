@@ -1,109 +1,109 @@
 temp,dataset_or_rollup,comparison,metric,n,delta_pct,ci_low,ci_high
-0.0,GSM8K,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,-1.8488020173447306,-3.6011996683765424,-0.00772130827517703
-0.0,GSM8K,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,26.862657445398774,22.567093584165466,31.356484513704117
-0.0,GSM8K,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,26.80762387203739,22.483979448367954,31.34260645132423
-0.0,MATH-500,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,1.4680887762602568,-0.7227386733828611,3.84319385059535
-0.0,MATH-500,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,-0.7284028231242412,-5.413499352029683,4.33995569726997
-0.0,MATH-500,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,-3.448953331464899,-10.594274288396887,3.757988006944646
-0.0,AIME25,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),29,6.628704027353627,1.5518852512738324,11.909231852637681
-0.0,AIME25,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),29,-7.856366558187511,-11.831350014562991,-3.698034983148857
-0.0,AIME25,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),29,-7.844391592962452,-11.746782261840604,-3.6728806196733244
-0.0,HumanEval,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,7.1493637758754724,5.122347275596928,9.21598989339274
-0.0,HumanEval,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,-7.575675279731331,-9.481757267093194,-5.59292262374651
-0.0,HumanEval,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,-7.563526789473851,-9.434427498420284,-5.557790391685402
-0.0,MBPP,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,5.1978343862997045,2.766583593071714,7.7488256141315714
-0.0,MBPP,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,2.7313845179404828,-0.23291528238695847,5.676944167644371
-0.0,MBPP,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,2.825883199426227,-0.1475302046341942,5.67695316605239
-0.0,LCB,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,5.379353878338211,0.22681314660735197,11.897028184690605
-0.0,LCB,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,-14.671241399220293,-19.015530093697564,-9.585404898673588
-0.0,LCB,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,-14.559486551053569,-18.94387447493949,-9.474772952970145
-0.0,MT-Bench,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),99,8.911871339565547,5.704585770264137,12.82993485062962
-0.0,MT-Bench,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),99,3.9900914808680854,0.6592026750625202,7.509771056256698
-0.0,MT-Bench,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),99,4.04559164878513,0.6215242999285664,7.492382282057708
-0.0,Alpaca,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,15.775130185323594,10.971608866080484,20.848334595750483
-0.0,Alpaca,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,17.032361470923064,10.244699500244403,24.464940024905513
-0.0,Alpaca,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,17.19425733278279,10.439332893622733,24.696098251669298
-0.0,Math,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),127,0.8521939005082135,-0.6633611517235072,2.4693098731133123
-0.0,Math,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),127,7.904691210608217,4.0862557523536625,11.887534230303931
-0.0,Math,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),127,6.634173642970476,1.972121095959789,11.29140020382533
-0.0,Code,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),147,5.903784761383313,3.8902052675799492,8.109208680375923
-0.0,Code,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),147,-6.758042582331947,-9.017969911358481,-4.406216360977988
-0.0,Code,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),147,-6.684704262897911,-8.996427832314946,-4.340153530518609
-0.0,Chat,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),148,10.803772856163384,7.996195903406522,13.984542849404246
-0.0,Chat,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),148,7.40372290584026,4.067536657188908,10.854782264775942
-0.0,Chat,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),148,7.484914470875692,4.223585019845122,10.903584882335092
-0.0,Overall,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),422,5.101117136469613,3.870522916316621,6.397360887881587
-0.0,Overall,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),422,1.9947179444615104,0.02437983887184636,3.990967990173666
-0.0,Overall,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),422,1.6094286710080175,-0.5494429232946851,3.7328813511846803
-0.5,GSM8K,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,-1.4544375974234969,-4.61165915642513,2.1343436196911147
-0.5,GSM8K,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,21.9057766386751,16.80210077021713,27.546219911957337
-0.5,GSM8K,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,22.33216714911277,16.86002291360744,28.096593742307462
-0.5,MATH-500,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,3.270963561378837,-0.8860046187681547,7.71362286394186
-0.5,MATH-500,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,-1.2137972808680009,-4.955060719095972,2.65526799543927
-0.5,MATH-500,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,-4.004180511561895,-7.690343942527001,-0.2418286587266283
-0.5,AIME25,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),29,8.988240010794279,5.4477695940361,12.884129608666184
-0.5,AIME25,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),29,-8.481665837614072,-11.9976870713983,-4.902426124138093
-0.5,AIME25,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),29,-9.357353469450103,-13.354706208184908,-5.423923204609782
-0.5,HumanEval,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,7.105950668652383,3.1560464353163953,11.171092802227832
-0.5,HumanEval,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,-8.88133219381324,-12.56763179373337,-5.17926424272388
-0.5,HumanEval,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,-8.616246175350373,-12.146358107272315,-4.956502935024931
-0.5,MBPP,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,5.271727600479426,1.3298225642981665,9.477763721101828
-0.5,MBPP,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,-1.0695507877091615,-4.51114896378646,2.4583373507770734
-0.5,MBPP,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,1.7391286920996674,-1.540901188570154,5.296009785116529
-0.5,LCB,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,4.284652944982192,-0.18375207835351626,8.912908042775891
-0.5,LCB,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,-16.19452190190447,-20.654135620986036,-11.389738376690616
-0.5,LCB,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,-15.464511852719887,-20.365014393303092,-10.319084730494666
-0.5,MT-Bench,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),99,10.278568071116068,6.774398732266862,14.0890119897638
-0.5,MT-Bench,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),99,0.5191391022305591,-3.162543482617386,4.352726461456324
-0.5,MT-Bench,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),99,0.37808228449260906,-3.780240630875531,4.659465137329044
-0.5,Alpaca,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,14.474995957343651,9.663829122676448,19.68826478216783
-0.5,Alpaca,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,16.512645964994398,9.106599466168387,25.14266826258933
-0.5,Alpaca,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,16.018912031147757,8.5443126003661,23.91978170768818
-0.5,Math,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),127,2.02697300760859,-0.3124447086834903,4.595465765389473
-0.5,Math,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),127,6.069751530047229,2.556882281864259,9.607340368506412
-0.5,Math,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),127,4.714663373465355,1.176005534532476,8.37286499175991
-0.5,Code,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),147,5.574957544718084,3.1757571125036854,8.027570063727829
-0.5,Code,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),147,-8.851085077320132,-11.335664836570537,-6.323559362894427
-0.5,Code,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),147,-7.669298496902977,-10.366486851032485,-4.957811658949119
-0.5,Chat,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),148,11.460630565394636,8.5919195279353,14.634309793417533
-0.5,Chat,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),148,4.639914497628972,1.0879213527338116,8.51150323856844
-0.5,Chat,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),148,4.416498308938954,0.4289038998699146,8.47715326795675
-0.5,Overall,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),422,5.6906132401909115,4.195927509638131,7.2260563166048675
-0.5,Overall,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),422,-0.27404419348223685,-2.1951647216916226,1.7521088459287792
-0.5,Overall,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),422,-0.26449182346962585,-2.265074611927187,1.7820667853930328
-1.0,GSM8K,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,3.3509086384757136,-0.6064476561043919,7.521731441016022
-1.0,GSM8K,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,15.791220713019527,10.563571109822822,21.018878130238793
-1.0,GSM8K,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,17.323841514622075,11.571393031544597,22.985638632632345
-1.0,MATH-500,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,4.670865269224578,0.6594769630250186,9.444337554775872
-1.0,MATH-500,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,-4.627955558671781,-8.94221571308903,0.1332366355397463
-1.0,MATH-500,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,-5.36121841235987,-9.37025341631731,-1.0296868121762004
-1.0,AIME25,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),29,8.677807734248555,0.2057714732496052,17.232342159720424
-1.0,AIME25,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),29,-13.323877132247453,-18.22647354616994,-8.267602649030348
-1.0,AIME25,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),29,-13.833610188441925,-18.411040646831122,-9.184389782906965
-1.0,HumanEval,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,8.486049636316096,4.541515080626213,12.586614906709093
-1.0,HumanEval,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,-8.795547778507395,-11.882871396079231,-5.480098720814541
-1.0,HumanEval,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,-5.974920383691851,-9.965787468602894,-1.7180966083253368
-1.0,MBPP,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,4.686958826394716,0.3713566387807621,9.507423457266295
-1.0,MBPP,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,0.17408474096067827,-3.468794376900264,4.110266247682182
-1.0,MBPP,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,-0.14734115757263355,-3.7211015673005665,3.607195354238857
-1.0,LCB,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,4.75152032568027,0.9567692538414496,9.035208798672588
-1.0,LCB,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,-19.153398986141358,-23.135021488385455,-15.123455869799008
-1.0,LCB,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,-20.170160823061767,-23.520104739108604,-16.744541565530348
-1.0,MT-Bench,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),99,5.993910153467885,1.3035527501895405,10.406714366733393
-1.0,MT-Bench,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),99,-1.297660131820011,-4.736277608951644,2.3517772557016148
-1.0,MT-Bench,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),99,-0.6827003518753427,-4.3529192453280245,2.954064886041663
-1.0,Alpaca,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),49,12.691063133056101,7.878091992211367,17.810593984341637
-1.0,Alpaca,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),49,11.377496575213918,4.918540346342337,18.367692391482706
-1.0,Alpaca,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),49,9.470494542776176,3.114742921833602,16.4227447255189
-1.0,Math,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),127,4.624765727747859,1.912919191543505,7.599526973182136
-1.0,Math,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),127,2.000990053881191,-1.6621280619414924,5.601610644307131
-1.0,Math,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),127,2.0916470763985506,-1.542408976172993,5.841754236558994
-1.0,Code,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),147,5.970464349887217,3.4907370120370818,8.519429272557776
-1.0,Code,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),147,-9.496793589324481,-12.059520859126028,-6.984135693882232
-1.0,Code,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),147,-9.065498048477371,-11.591303403839802,-6.514113565989099
-1.0,Chat,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),148,7.865327762641061,4.265191337437257,11.431093760568988
-1.0,Chat,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),148,2.0670544672867885,-1.0958773204101768,5.4561080761875935
-1.0,Chat,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),148,2.0592836972831208,-1.3103363129098322,5.5493328767177275
-1.0,Overall,DominoTree cond@16 vs Domino-chain,raw per-prompt TPS (same harness),422,5.988282539476941,4.278847411468845,7.655647393629028
-1.0,Overall,DominoTree cond@16 vs DDTree@16,speedup-over-own-AR (cross harness),422,-2.694214646847448,-4.5420880397220476,-0.792336664012383
-1.0,Overall,DominoTree cond@16 vs CaDDTree,speedup-over-own-AR (cross harness),422,-2.477455084059099,-4.397792428066738,-0.5307810444714289
+0.0,GSM8K,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,-1.8488020173447306,-3.6011996683765424,-0.00772130827517703
+0.0,GSM8K,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,26.862657445398774,22.567093584165466,31.356484513704117
+0.0,GSM8K,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,26.80762387203739,22.483979448367954,31.34260645132423
+0.0,MATH-500,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,1.4680887762602568,-0.7227386733828611,3.84319385059535
+0.0,MATH-500,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,-0.7284028231242412,-5.413499352029683,4.33995569726997
+0.0,MATH-500,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,-3.448953331464899,-10.594274288396887,3.757988006944646
+0.0,AIME25,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),29,6.628704027353627,1.5518852512738324,11.909231852637681
+0.0,AIME25,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),29,-7.856366558187511,-11.831350014562991,-3.698034983148857
+0.0,AIME25,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),29,-7.844391592962452,-11.746782261840604,-3.6728806196733244
+0.0,HumanEval,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,7.1493637758754724,5.122347275596928,9.21598989339274
+0.0,HumanEval,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,-7.575675279731331,-9.481757267093194,-5.59292262374651
+0.0,HumanEval,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,-7.563526789473851,-9.434427498420284,-5.557790391685402
+0.0,MBPP,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,5.1978343862997045,2.766583593071714,7.7488256141315714
+0.0,MBPP,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,2.7313845179404828,-0.23291528238695847,5.676944167644371
+0.0,MBPP,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,2.825883199426227,-0.1475302046341942,5.67695316605239
+0.0,LCB,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,5.379353878338211,0.22681314660735197,11.897028184690605
+0.0,LCB,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,-14.671241399220293,-19.015530093697564,-9.585404898673588
+0.0,LCB,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,-14.559486551053569,-18.94387447493949,-9.474772952970145
+0.0,MT-Bench,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),99,8.911871339565547,5.704585770264137,12.82993485062962
+0.0,MT-Bench,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),99,3.9900914808680854,0.6592026750625202,7.509771056256698
+0.0,MT-Bench,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),99,4.04559164878513,0.6215242999285664,7.492382282057708
+0.0,Alpaca,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,15.775130185323594,10.971608866080484,20.848334595750483
+0.0,Alpaca,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,17.032361470923064,10.244699500244403,24.464940024905513
+0.0,Alpaca,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,17.19425733278279,10.439332893622733,24.696098251669298
+0.0,Math,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),127,0.8521939005082135,-0.6633611517235072,2.4693098731133123
+0.0,Math,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),127,7.904691210608217,4.0862557523536625,11.887534230303931
+0.0,Math,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),127,6.634173642970476,1.972121095959789,11.29140020382533
+0.0,Code,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),147,5.903784761383313,3.8902052675799492,8.109208680375923
+0.0,Code,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),147,-6.758042582331947,-9.017969911358481,-4.406216360977988
+0.0,Code,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),147,-6.684704262897911,-8.996427832314946,-4.340153530518609
+0.0,Chat,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),148,10.803772856163384,7.996195903406522,13.984542849404246
+0.0,Chat,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),148,7.40372290584026,4.067536657188908,10.854782264775942
+0.0,Chat,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),148,7.484914470875692,4.223585019845122,10.903584882335092
+0.0,Overall,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),422,5.101117136469613,3.870522916316621,6.397360887881587
+0.0,Overall,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),422,1.9947179444615104,0.02437983887184636,3.990967990173666
+0.0,Overall,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),422,1.6094286710080175,-0.5494429232946851,3.7328813511846803
+0.5,GSM8K,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,-1.4544375974234969,-4.61165915642513,2.1343436196911147
+0.5,GSM8K,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,21.9057766386751,16.80210077021713,27.546219911957337
+0.5,GSM8K,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,22.33216714911277,16.86002291360744,28.096593742307462
+0.5,MATH-500,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,3.270963561378837,-0.8860046187681547,7.71362286394186
+0.5,MATH-500,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,-1.2137972808680009,-4.955060719095972,2.65526799543927
+0.5,MATH-500,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,-4.004180511561895,-7.690343942527001,-0.2418286587266283
+0.5,AIME25,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),29,8.988240010794279,5.4477695940361,12.884129608666184
+0.5,AIME25,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),29,-8.481665837614072,-11.9976870713983,-4.902426124138093
+0.5,AIME25,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),29,-9.357353469450103,-13.354706208184908,-5.423923204609782
+0.5,HumanEval,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,7.105950668652383,3.1560464353163953,11.171092802227832
+0.5,HumanEval,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,-8.88133219381324,-12.56763179373337,-5.17926424272388
+0.5,HumanEval,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,-8.616246175350373,-12.146358107272315,-4.956502935024931
+0.5,MBPP,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,5.271727600479426,1.3298225642981665,9.477763721101828
+0.5,MBPP,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,-1.0695507877091615,-4.51114896378646,2.4583373507770734
+0.5,MBPP,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,1.7391286920996674,-1.540901188570154,5.296009785116529
+0.5,LCB,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,4.284652944982192,-0.18375207835351626,8.912908042775891
+0.5,LCB,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,-16.19452190190447,-20.654135620986036,-11.389738376690616
+0.5,LCB,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,-15.464511852719887,-20.365014393303092,-10.319084730494666
+0.5,MT-Bench,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),99,10.278568071116068,6.774398732266862,14.0890119897638
+0.5,MT-Bench,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),99,0.5191391022305591,-3.162543482617386,4.352726461456324
+0.5,MT-Bench,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),99,0.37808228449260906,-3.780240630875531,4.659465137329044
+0.5,Alpaca,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,14.474995957343651,9.663829122676448,19.68826478216783
+0.5,Alpaca,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,16.512645964994398,9.106599466168387,25.14266826258933
+0.5,Alpaca,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,16.018912031147757,8.5443126003661,23.91978170768818
+0.5,Math,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),127,2.02697300760859,-0.3124447086834903,4.595465765389473
+0.5,Math,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),127,6.069751530047229,2.556882281864259,9.607340368506412
+0.5,Math,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),127,4.714663373465355,1.176005534532476,8.37286499175991
+0.5,Code,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),147,5.574957544718084,3.1757571125036854,8.027570063727829
+0.5,Code,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),147,-8.851085077320132,-11.335664836570537,-6.323559362894427
+0.5,Code,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),147,-7.669298496902977,-10.366486851032485,-4.957811658949119
+0.5,Chat,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),148,11.460630565394636,8.5919195279353,14.634309793417533
+0.5,Chat,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),148,4.639914497628972,1.0879213527338116,8.51150323856844
+0.5,Chat,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),148,4.416498308938954,0.4289038998699146,8.47715326795675
+0.5,Overall,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),422,5.6906132401909115,4.195927509638131,7.2260563166048675
+0.5,Overall,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),422,-0.27404419348223685,-2.1951647216916226,1.7521088459287792
+0.5,Overall,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),422,-0.26449182346962585,-2.265074611927187,1.7820667853930328
+1.0,GSM8K,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,3.3509086384757136,-0.6064476561043919,7.521731441016022
+1.0,GSM8K,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,15.791220713019527,10.563571109822822,21.018878130238793
+1.0,GSM8K,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,17.323841514622075,11.571393031544597,22.985638632632345
+1.0,MATH-500,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,4.670865269224578,0.6594769630250186,9.444337554775872
+1.0,MATH-500,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,-4.627955558671781,-8.94221571308903,0.1332366355397463
+1.0,MATH-500,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,-5.36121841235987,-9.37025341631731,-1.0296868121762004
+1.0,AIME25,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),29,8.677807734248555,0.2057714732496052,17.232342159720424
+1.0,AIME25,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),29,-13.323877132247453,-18.22647354616994,-8.267602649030348
+1.0,AIME25,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),29,-13.833610188441925,-18.411040646831122,-9.184389782906965
+1.0,HumanEval,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,8.486049636316096,4.541515080626213,12.586614906709093
+1.0,HumanEval,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,-8.795547778507395,-11.882871396079231,-5.480098720814541
+1.0,HumanEval,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,-5.974920383691851,-9.965787468602894,-1.7180966083253368
+1.0,MBPP,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,4.686958826394716,0.3713566387807621,9.507423457266295
+1.0,MBPP,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,0.17408474096067827,-3.468794376900264,4.110266247682182
+1.0,MBPP,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,-0.14734115757263355,-3.7211015673005665,3.607195354238857
+1.0,LCB,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,4.75152032568027,0.9567692538414496,9.035208798672588
+1.0,LCB,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,-19.153398986141358,-23.135021488385455,-15.123455869799008
+1.0,LCB,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,-20.170160823061767,-23.520104739108604,-16.744541565530348
+1.0,MT-Bench,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),99,5.993910153467885,1.3035527501895405,10.406714366733393
+1.0,MT-Bench,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),99,-1.297660131820011,-4.736277608951644,2.3517772557016148
+1.0,MT-Bench,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),99,-0.6827003518753427,-4.3529192453280245,2.954064886041663
+1.0,Alpaca,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),49,12.691063133056101,7.878091992211367,17.810593984341637
+1.0,Alpaca,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),49,11.377496575213918,4.918540346342337,18.367692391482706
+1.0,Alpaca,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),49,9.470494542776176,3.114742921833602,16.4227447255189
+1.0,Math,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),127,4.624765727747859,1.912919191543505,7.599526973182136
+1.0,Math,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),127,2.000990053881191,-1.6621280619414924,5.601610644307131
+1.0,Math,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),127,2.0916470763985506,-1.542408976172993,5.841754236558994
+1.0,Code,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),147,5.970464349887217,3.4907370120370818,8.519429272557776
+1.0,Code,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),147,-9.496793589324481,-12.059520859126028,-6.984135693882232
+1.0,Code,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),147,-9.065498048477371,-11.591303403839802,-6.514113565989099
+1.0,Chat,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),148,7.865327762641061,4.265191337437257,11.431093760568988
+1.0,Chat,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),148,2.0670544672867885,-1.0958773204101768,5.4561080761875935
+1.0,Chat,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),148,2.0592836972831208,-1.3103363129098322,5.5493328767177275
+1.0,Overall,DominoTree (16) vs Domino-chain,raw per-prompt TPS (same harness),422,5.988282539476941,4.278847411468845,7.655647393629028
+1.0,Overall,DominoTree (16) vs DDTree@16,speedup-over-own-AR (cross harness),422,-2.694214646847448,-4.5420880397220476,-0.792336664012383
+1.0,Overall,DominoTree (16) vs CaDDTree,speedup-over-own-AR (cross harness),422,-2.477455084059099,-4.397792428066738,-0.5307810444714289
