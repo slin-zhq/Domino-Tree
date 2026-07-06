@@ -43,6 +43,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--out", required=True, help="Output JSONL path.")
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument(
+        "--gpu-native-build",
+        action="store_true",
+        help=(
+            "Opt-in: build the dominotree method's conditional children via the CUDA-graph "
+            "node expander (dominotree_gpu.GraphNodeExpander) instead of the pure-Python "
+            "children_fn. Must produce identical trees (same out_sig at T=0); the pure-Python "
+            "path remains the default. DOMINOTREE_GPU_EAGER=1 disables graph capture (debug)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -93,6 +103,24 @@ def main() -> None:
     layer_ids = draft.target_layer_ids
     mask_token_id = draft.mask_token_id
     eos = tokenizer.eos_token_id
+
+    graph_expander = None
+    if args.gpu_native_build and "dominotree" in methods:
+        import dominotree_gpu
+
+        graph_expander = dominotree_gpu.GraphNodeExpander(
+            target=target,
+            draft=draft,
+            k_draft=k_draft,
+            prefix_len=prefix_len,
+            node_topk=args.node_topk,
+            corr_topm=args.corr_topm,
+            device=device,
+        )
+        print(
+            f"[gpu-native-build] node expander active: graphs={'on' if graph_expander.use_graphs else 'OFF (eager-static)'} "
+            f"k_draft={k_draft} node_topk={args.node_topk} corr_topm={args.corr_topm} prefix_len={prefix_len}"
+        )
 
     dataset = load_and_process_dataset(args.dataset)
     if args.max_samples and len(dataset) > args.max_samples:
@@ -186,6 +214,10 @@ def main() -> None:
                 if mode == "marg":
                     children_fn = domino_adapter.make_marginal_children_fn(base_logits, k_draft, args.node_topk)
                     root_state_for_tree = None
+                elif graph_expander is not None:
+                    graph_expander.begin_round(ph, base_logits)
+                    children_fn = graph_expander.children_fn
+                    root_state_for_tree = root_state
                 else:
                     children_fn = domino_adapter.make_conditional_children_fn(
                         target=target,
@@ -313,6 +345,7 @@ def main() -> None:
                     "mean_accept": statistics.fmean(accs) if accs else 0.0,
                     "out_sig": out_sig,
                     "out_head": out_head,
+                    "gpu_native_build": bool(args.gpu_native_build),
                 }
                 rec.update({f"ms_{key}": value for key, value in ms.items()})
                 records.append(rec)

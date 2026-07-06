@@ -222,6 +222,25 @@ def _self_test() -> None:
     for pos, row in enumerate(build_attention_rows(cond_nodes)):
         assert max(row) <= pos
 
+    # A children_fn may be a stateful bound method (as the GPU-native expander
+    # uses); the builder must not care. Same toy scorer as above, via a class.
+    class _StatefulScorer:
+        def children_fn(self, state, child_depth):
+            return cond_children_fn(state, child_depth)
+
+    method_nodes = build_best_first_tree(_StatefulScorer().children_fn, root_state=0, budget=5, max_depth=3)
+    assert [(n.token, n.depth, n.parent) for n in method_nodes] == [
+        (n.token, n.depth, n.parent) for n in cond_nodes
+    ]
+
+    # GPU-native builder equivalence suite (torch-dependent; skipped if absent).
+    try:
+        import dominotree_gpu
+    except ImportError:
+        print("dominotree self-test: torch not installed; skipping dominotree_gpu equivalence suite")
+    else:
+        dominotree_gpu._self_test()
+
     print("dominotree self-test: ALL PASSED")
 
 
