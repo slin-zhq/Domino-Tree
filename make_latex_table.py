@@ -85,8 +85,10 @@ def group_by_method(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]
 
 
 def load_dominotree(raw_dir: Path, dataset: str, temp: str) -> dict[str, list[dict[str, Any]]]:
-    override = raw_dir / "dominotree_recollected" / f"{dataset}_T{temp}.jsonl"
-    path = override if override.exists() else raw_dir / "dominotree" / f"{dataset}_T{temp}.jsonl"
+    # dominotree/ holds the DEFAULT results, built with the GPU-native CUDA-graph
+    # tree builder. The Python reference-builder results (bit-identical trees, used
+    # only for the builder comparison) live in dominotree_python_builder/.
+    path = raw_dir / "dominotree" / f"{dataset}_T{temp}.jsonl"
     grouped = group_by_method(read_jsonl(path))
     # Warmup-row exclusion: drop the first execution row per method. These frozen
     # records were collected by the earlier harness, which did NOT run an in-loop
@@ -326,7 +328,10 @@ def write_conditioning_ablation_table(raw_dir: Path, out_dir: Path, bootstrap_it
         }
 
     def load_records(dataset: str) -> list[dict[str, float]]:
-        dominotree_rows = read_jsonl(raw_dir / "dominotree" / f"{dataset}_T0.0.jsonl")
+        # Conditioning ablation holds the BUILDER fixed across cond/marg to isolate
+        # the scorer, so both come from the Python reference builder (marg has no
+        # GPU-native path); this is a controlled scorer comparison, not the default.
+        dominotree_rows = read_jsonl(raw_dir / "dominotree_python_builder" / f"{dataset}_T0.0.jsonl")
         marginal_rows = read_jsonl(ablation_dir / f"{dataset}_T0.0.jsonl")
         ar_map = by_pair(dominotree_rows, "ar")
         cond_map = by_pair(dominotree_rows, "dominotree@16")
