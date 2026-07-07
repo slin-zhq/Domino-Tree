@@ -276,17 +276,22 @@ def pairwise_units(data: dict[str, Any], temp: str, dataset: str, comparison: st
         left, right = keyed(dominotree["dominotree@16"], "tps"), keyed(dominotree["chain"], "tps")
     else:
         left = speedup_by_exec(dominotree["dominotree@16"], dominotree["ar"])
-        baseline_method = "ddtree_tb16" if comparison == "ddtree_tb16" else "caddtree"
+        baseline_method = comparison  # ddtree_tb16 | caddtree | dflash — all DFlash-harness baselines
         right = speedup_by_exec(baseline[baseline_method], baseline["baseline"])
     return [(left[idx], right[idx]) for idx in sorted(set(left) & set(right))]
 
 
 def write_pairwise(data: dict[str, Any], temps: list[str], out_dir: Path, bootstrap_iters: int, seed: int) -> None:
     rng = random.Random(seed)
+    # DFlash was added later; it draws from an independent stream so the original
+    # three comparisons consume `rng` in the exact same order as before -> their
+    # bootstrap CIs stay byte-identical, and DFlash is purely additive.
+    rng_extra = random.Random(seed + 1)
     comparisons = [
         ("chain", "DominoTree (16) vs Domino-chain", "raw per-prompt TPS (same harness)"),
         ("ddtree_tb16", "DominoTree (16) vs DDTree@16", "speedup-over-own-AR (cross harness)"),
         ("caddtree", "DominoTree (16) vs CaDDTree", "speedup-over-own-AR (cross harness)"),
+        ("dflash", "DominoTree (16) vs DFlash", "speedup-over-own-AR (cross harness)"),
     ]
     row_groups = [(LABELS[d], [d]) for d in DATASETS] + [(name, datasets) for name, datasets in GROUPS.items()]
     lines = [
@@ -304,7 +309,7 @@ def write_pairwise(data: dict[str, Any], temps: list[str], out_dir: Path, bootst
                 pairs = []
                 for ds in datasets:
                     pairs.extend(pairwise_units(data, temp, ds, key))
-                obs, lo, hi = paired_delta_ci(pairs, bootstrap_iters, rng)
+                obs, lo, hi = paired_delta_ci(pairs, bootstrap_iters, rng_extra if key == "dflash" else rng)
                 ci = f"[{fmt(lo)}, {fmt(hi)}]" if math.isfinite(lo) else "--"
                 lines.append("| " + " | ".join([temp, name, label, metric, str(len(pairs)), fmt(obs), ci]) + " |")
                 csv_rows.append({"temp": temp, "dataset_or_rollup": name, "comparison": label, "metric": metric, "n": len(pairs), "delta_pct": obs, "ci_low": lo, "ci_high": hi})
