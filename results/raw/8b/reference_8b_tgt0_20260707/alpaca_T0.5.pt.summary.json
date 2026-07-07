@@ -1,0 +1,60 @@
+{
+  "args": {
+    "model_name_or_path": "Qwen3-8B",
+    "draft_name_or_path": "Qwen3-8B-DFlash-b16",
+    "block_size": null,
+    "tree_budget": "16",
+    "dataset": "alpaca",
+    "max_samples": 50,
+    "max_new_tokens": 2048,
+    "temperature": 0.5,
+    "flash_attn": false,
+    "disable_cpp_compact_cache": false,
+    "skip_baseline": true,
+    "cost_model_path": "Qwen3-8B_convex.pt",
+    "cost_profile_path": null,
+    "draft_cost": null,
+    "max_tree_budget": 16,
+    "skip_caddtree": false,
+    "caddtree_only": false,
+    "save_tree_traces": false
+  },
+  "block_size": 16,
+  "rows": [
+    {
+      "method": "dflash",
+      "samples": 50,
+      "output_tokens": 16538,
+      "decode_seconds": 476.47142641991377,
+      "tps_total": 34.709321657045344,
+      "ms_per_token_unweighted": 28.546851672854668,
+      "accept_len_round_weighted": 2.733718054410552,
+      "decode_rounds_mean": 121.3,
+      "speedup_vs_baseline": 0.0
+    },
+    {
+      "method": "ddtree_tb16",
+      "samples": 50,
+      "output_tokens": 16512,
+      "decode_seconds": 372.47914503514767,
+      "tps_total": 44.32999865923206,
+      "ms_per_token_unweighted": 22.68077296911049,
+      "accept_len_round_weighted": 3.6722875526958063,
+      "decode_rounds_mean": 90.14,
+      "speedup_vs_baseline": 0.0
+    },
+    {
+      "method": "caddtree",
+      "samples": 50,
+      "output_tokens": 16848,
+      "decode_seconds": 379.34512042440474,
+      "tps_total": 44.41338267683726,
+      "ms_per_token_unweighted": 22.45193794196835,
+      "accept_len_round_weighted": 3.641346568839016,
+      "decode_rounds_mean": 92.68,
+      "budget_mean_unweighted": 16.0,
+      "budget_std_unweighted": 0.0,
+      "speedup_vs_baseline": 0.0
+    }
+  ]
+}

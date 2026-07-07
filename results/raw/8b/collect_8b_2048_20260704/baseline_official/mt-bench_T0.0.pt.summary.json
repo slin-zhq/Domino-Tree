@@ -1,0 +1,71 @@
+{
+  "args": {
+    "model_name_or_path": "Qwen3-8B",
+    "draft_name_or_path": "Qwen3-8B-DFlash-b16",
+    "block_size": null,
+    "tree_budget": "16",
+    "dataset": "mt-bench",
+    "max_samples": 50,
+    "max_new_tokens": 2048,
+    "temperature": 0.0,
+    "flash_attn": false,
+    "disable_cpp_compact_cache": false,
+    "skip_baseline": false,
+    "cost_model_path": "Qwen3-8B_convex.pt",
+    "cost_profile_path": null,
+    "draft_cost": null,
+    "max_tree_budget": 16,
+    "skip_caddtree": false,
+    "caddtree_only": false,
+    "save_tree_traces": false
+  },
+  "block_size": 16,
+  "rows": [
+    {
+      "method": "baseline",
+      "samples": 100,
+      "output_tokens": 48168,
+      "decode_seconds": 3145.211184372194,
+      "tps_total": 15.31471089742251,
+      "ms_per_token_unweighted": 64.90960555205201,
+      "accept_len_round_weighted": 1.0,
+      "decode_rounds_mean": 480.68,
+      "speedup_vs_baseline": 1.0
+    },
+    {
+      "method": "dflash",
+      "samples": 100,
+      "output_tokens": 47263,
+      "decode_seconds": 1286.1516521601006,
+      "tps_total": 36.74761053303587,
+      "ms_per_token_unweighted": 26.983398123429183,
+      "accept_len_round_weighted": 3.342395141929106,
+      "decode_rounds_mean": 141.62,
+      "speedup_vs_baseline": 2.3994975014004702
+    },
+    {
+      "method": "ddtree_tb16",
+      "samples": 100,
+      "output_tokens": 48036,
+      "decode_seconds": 1148.2671356117353,
+      "tps_total": 41.83347107152813,
+      "ms_per_token_unweighted": 23.473154462001173,
+      "accept_len_round_weighted": 4.175898593505817,
+      "decode_rounds_mean": 115.18,
+      "speedup_vs_baseline": 2.731587383642271
+    },
+    {
+      "method": "caddtree",
+      "samples": 100,
+      "output_tokens": 48036,
+      "decode_seconds": 1143.9653165191412,
+      "tps_total": 41.99078355466579,
+      "ms_per_token_unweighted": 23.360605137054577,
+      "accept_len_round_weighted": 4.176450156304273,
+      "decode_rounds_mean": 115.16,
+      "budget_mean_unweighted": 15.99929761904762,
+      "budget_std_unweighted": 0.0036642493903837193,
+      "speedup_vs_baseline": 2.7418593688068187
+    }
+  ]
+}

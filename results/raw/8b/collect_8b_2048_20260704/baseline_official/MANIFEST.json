@@ -1,0 +1,14 @@
+{
+  "official_remote": "https://github.com/ZhangShuai1230/CaDDTree.git",
+  "official_commit": "a88f3f3d8656b2aad068a5b25176c0b8581d7ac3",
+  "target_model": "Qwen3-8B",
+  "draft_model": "Qwen3-8B-DFlash-b16",
+  "draft_type": "native DFlash",
+  "cost_model": "Qwen3-8B_convex.pt",
+  "cost_model_source": "official_repo_present",
+  "temperature": 0.0,
+  "tree_budget": 16,
+  "max_new_tokens": 2048,
+  "max_samples": 50,
+  "gate": "after gsm8k, require ddtree_tb16 accept_len_round_weighted > 3"
+}
