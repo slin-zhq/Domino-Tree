@@ -1,0 +1,10 @@
+{
+  "raw_dir": "results/raw",
+  "temps": [
+    "0.0",
+    "0.5",
+    "1.0"
+  ],
+  "warmup_exclusion": "DominoTree rows only: first execution row per dataset/temp/method",
+  "baseline_ddtree_caddtree_source": "official CaDDTree repo commit a88f3f3 on native Qwen3-4B-DFlash-b16"
+}
