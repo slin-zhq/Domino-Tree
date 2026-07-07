@@ -79,6 +79,10 @@ def main() -> None:
 
     if args.sample_draft and args.temperature < 1e-5:
         print("[info] --sample-draft has no effect at temperature<1e-5 (sampling reduces to argmax).")
+    if args.sample_draft and args.gpu_native_build and "dominotree" in methods:
+        print("[warn] --sample-draft is not applied to the dominotree tree under --gpu-native-build: "
+              "the GPU-native builder is deterministic. The chain draft is still sampled; use the "
+              "default Python builder if you want sampled tree candidates.")
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
