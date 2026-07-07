@@ -97,7 +97,8 @@ for temp, odir, dm in [('0.0', OUR_T0_GPU, 'dominotree@16'),
         continue
     latex_block(temp, out)
 
-# python-builder T=0 (validation vs current paper: DominoTree 6.30/10.53, Domino 6.77/10.13)
+# python-builder T=0 sanity: Overall should print ~DominoTree 4.90/8.09, Domino 4.88/7.32
+# (the pre-GPU-native 8B T=0 values; confirms only the builder, not the data, moves the numbers)
 print("% --- python-builder T=0 (sanity vs current paper 8B T=0) ---")
 b0 = compute('0.0', OUR_T0, 'cond@16')
 if b0:
