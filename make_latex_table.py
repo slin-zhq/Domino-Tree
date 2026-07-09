@@ -47,7 +47,7 @@ TABLE1_METHODS = [
     ("baseline_ddtree_caddtree", "dflash", "DFlash"),
     ("baseline_ddtree_caddtree", "ddtree_tb16", "DDTree@16"),
     ("baseline_ddtree_caddtree", "caddtree", "CaDDTree"),
-    ("dominotree", "chain", "Domino-chain"),
+    ("domino_official", "domino", "Domino"),
     ("dominotree", "dominotree@16", "DominoTree (16)"),
 ]
 
@@ -84,7 +84,7 @@ def group_by_method(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]
     return add_exec_idx(dict(grouped))
 
 
-def load_dominotree(raw_dir: Path, dataset: str, temp: str) -> dict[str, list[dict[str, Any]]]:
+def load_dominotree(raw_dir: Path, dataset: str, temp: str, drop_first: bool = True) -> dict[str, list[dict[str, Any]]]:
     # dominotree/ holds the DEFAULT results, built with the GPU-native CUDA-graph
     # tree builder. The Python reference-builder results (bit-identical trees, used
     # only for the builder comparison) live in dominotree_python_builder/.
@@ -99,11 +99,44 @@ def load_dominotree(raw_dir: Path, dataset: str, temp: str) -> dict[str, list[di
     # average over warm prompts only. We keep the exclusion here so these tables
     # reproduce the paper's numbers exactly; a fresh run from the warmup-enabled
     # benchmark.py is already warm from prompt 1 and would not need it.
-    return {method: sorted(rows, key=lambda r: r["_exec_idx"])[1:] for method, rows in grouped.items()}
+    trim = slice(1, None) if drop_first else slice(None)  # 4B (no in-loop warmup) drops first row; 8B (warmup) keeps all
+    return {method: sorted(rows, key=lambda r: r["_exec_idx"])[trim] for method, rows in grouped.items()}
 
 
 def load_baseline_ddtree_caddtree(raw_dir: Path, dataset: str, temp: str) -> dict[str, list[dict[str, Any]]]:
     return group_by_method(read_jsonl(raw_dir / "baseline_ddtree_caddtree" / f"{dataset}_T{temp}.jsonl"))
+
+
+def load_domino_official(raw_dir: Path, model_dir: str, dataset: str, temp: str, warmup: bool) -> dict[str, list[dict[str, Any]]]:
+    """Official released Domino: best-of(graph, eager) per dataset, converted to per-row
+    records {method:'domino', tps, mean_accept, sample_idx, turn_index}. `warmup=True`
+    (4B, in-benchmark warmup) keeps all prompts; `warmup=False` (8B, no warmup) drops the
+    first prompt. Returns {'domino': []} if the data is absent (graceful)."""
+    base = raw_dir / "domino_official" / model_dir
+    def mode_rows(mode: str) -> list[dict[str, Any]] | None:
+        path = base / f"T{temp}" / f"{mode}_{dataset}.jsonl"
+        if not path.exists():
+            return None
+        rows: list[dict[str, Any]] = []
+        for r in read_jsonl(path):
+            qid = int(r["question_id"])
+            c = r["choices"][1]  # block-size 16
+            accs = c.get("acceptance_lengths", [])
+            for ti, (nt, dc) in enumerate(zip(c["new_tokens"], c["decode_times"])):
+                if nt and dc > 0:
+                    acc = accs[ti] if ti < len(accs) else []
+                    rows.append({"method": "domino", "tps": nt / dc,
+                                 "mean_accept": statistics.fmean(acc) if acc else float("nan"),
+                                 "sample_idx": qid, "turn_index": ti})
+        if not warmup:
+            rows = [r for r in rows if r["sample_idx"] != 0]
+        return rows
+    g, e = mode_rows("graph"), mode_rows("eager")
+    if g is None:
+        return {"domino": []}
+    mtps = lambda rs: statistics.fmean([r["tps"] for r in rs]) if rs else 0.0
+    best = g if mtps(g) >= mtps(e or []) else e
+    return add_exec_idx({"domino": best})
 
 
 def aggregate(rows: list[dict[str, Any]]) -> dict[str, float]:
@@ -119,23 +152,48 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
-def collect_data(raw_dir: Path, temps: list[str]) -> dict[str, Any]:
+def collect_data(raw_dir: Path, temps: list[str], model_dir: str = "qwen3-4b",
+                 domino_warmup: bool = True, dt_drop_first: bool = True) -> dict[str, Any]:
     data: dict[str, Any] = {}
     for temp in temps:
         data[temp] = {}
         for dataset in DATASETS:
             data[temp][dataset] = {
-                "dominotree": load_dominotree(raw_dir, dataset, temp),
+                "dominotree": load_dominotree(raw_dir, dataset, temp, dt_drop_first),
                 "baseline_ddtree_caddtree": load_baseline_ddtree_caddtree(raw_dir, dataset, temp),
+                "domino_official": load_domino_official(raw_dir, model_dir, dataset, temp, domino_warmup),
             }
     return data
 
 
-def cell_metric(data: dict[str, Any], temp: str, dataset: str, harness: str, method: str) -> dict[str, float]:
+def common_ar_tps(data: dict[str, Any], temp: str, dataset: str) -> float:
+    """The single lean common AR (our-harness 'ar') used to normalize every method.
+
+    Our AR == the CaDDTree-harness AR (~66 tps, matched dataset-by-dataset); only
+    Domino's own AR (spec_generate(block_size=1)) is anomalously slow (~55), which
+    would inflate its speedup under own-AR normalization. Normalizing everything by
+    one lean AR removes that artifact and barely moves DFlash/DDTree/CaDDTree (their
+    AR is already ~66). See docs/domino_tree/domino_ar_overhead_proof_20260708.md.
+    """
+    return aggregate(data[temp][dataset]["dominotree"]["ar"])["tps"]
+
+
+# Official Domino methods whose OWN AR (spec_generate(block_size=1)) is anomalously
+# heavy (~23% slower than a lean AR); under "surgical" they are normalized by the lean
+# common AR instead. Everyone else keeps their own (already-lean ~66 tps) harness AR.
+DOMINO_OFFICIAL_METHODS = {"domino_graph", "domino_eager", "domino"}
+
+
+def cell_metric(data: dict[str, Any], temp: str, dataset: str, harness: str, method: str,
+                ar_norm: str = "surgical") -> dict[str, float]:
     rows = data[temp][dataset][harness][method]
     out = aggregate(rows)
-    ar_method = "baseline" if harness == "baseline_ddtree_caddtree" else "ar"
-    ar_tps = aggregate(data[temp][dataset][harness][ar_method])["tps"]
+    use_common = ar_norm == "common" or (ar_norm == "surgical" and method in DOMINO_OFFICIAL_METHODS)
+    if use_common:
+        ar_tps = common_ar_tps(data, temp, dataset)
+    else:  # own harness AR (reference baselines + DominoTree; and everything under --ar-norm own)
+        ar_method = "baseline" if harness == "baseline_ddtree_caddtree" else "ar"
+        ar_tps = aggregate(data[temp][dataset][harness][ar_method])["tps"]
     out["speedup"] = out["tps"] / ar_tps if ar_tps and math.isfinite(ar_tps) else float("nan")
     if harness == "baseline_ddtree_caddtree" and method == "baseline":
         out["speedup"] = 1.0
@@ -143,12 +201,21 @@ def cell_metric(data: dict[str, Any], temp: str, dataset: str, harness: str, met
     return out
 
 
-def write_table1(data: dict[str, Any], temps: list[str], out_dir: Path, model_label: str) -> None:
+def write_table1(data: dict[str, Any], temps: list[str], out_dir: Path, model_label: str,
+                 ar_norm: str = "surgical", suffix: str = "") -> None:
     columns = [LABELS[d] for d in DATASETS] + [f"{group} Avg" for group in GROUPS]
+    norm_note = {
+        "surgical": ("Speedup is relative to each method's own-harness AR, EXCEPT official Domino, "
+                     "whose own AR (spec_generate(block_size=1)) is ~23% heavier than a lean AR and "
+                     "is instead normalized by the lean common AR (our harness == CaDDTree harness, "
+                     "~66 tps). See the repo AR-normalization note."),
+        "common": ("Speedup is relative to ONE lean common AR (our-harness AR ~66 tps) for every method."),
+        "own": ("Speedup is relative to each method's own harness AR TPS."),
+    }[ar_norm]
     lines = [
         "# Table 1: Domino-style speedup / tau",
         "",
-        "Each cell is `speedup / tau`. Speedup is relative to the method's own harness AR TPS; DominoTree rows use warmup-row exclusion.",
+        f"Each cell is `speedup / tau`. {norm_note} DominoTree rows use warmup-row exclusion.",
         "",
     ]
     csv_rows = []
@@ -158,7 +225,7 @@ def write_table1(data: dict[str, Any], temps: list[str], out_dir: Path, model_la
         lines.append("| " + " | ".join(header) + " |")
         lines.append("| " + " | ".join(["---"] * len(header)) + " |")
         for harness, method, label in TABLE1_METHODS:
-            metrics = {ds: cell_metric(data, temp, ds, harness, method) for ds in DATASETS}
+            metrics = {ds: cell_metric(data, temp, ds, harness, method, ar_norm) for ds in DATASETS}
             cells = [f"{fmt(metrics[ds]['speedup'])} / {fmt(metrics[ds]['tau'])}" for ds in DATASETS]
             for group_datasets in GROUPS.values():
                 cells.append(
@@ -181,8 +248,8 @@ def write_table1(data: dict[str, Any], temps: list[str], out_dir: Path, model_la
                     }
                 )
         lines.append("")
-    (out_dir / "table1.md").write_text("\n".join(lines).rstrip() + "\n")
-    with (out_dir / "table1_cells.csv").open("w", newline="") as f:
+    (out_dir / f"table1{suffix}.md").write_text("\n".join(lines).rstrip() + "\n")
+    with (out_dir / f"table1_cells{suffix}.csv").open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(csv_rows[0].keys()))
         writer.writeheader()
         writer.writerows(csv_rows)
@@ -272,8 +339,15 @@ def paired_delta_ci(pairs: list[tuple[float, float]], iters: int, rng: random.Ra
 def pairwise_units(data: dict[str, Any], temp: str, dataset: str, comparison: str) -> list[tuple[float, float]]:
     dominotree = data[temp][dataset]["dominotree"]
     baseline = data[temp][dataset]["baseline_ddtree_caddtree"]
-    if comparison == "chain":
-        left, right = keyed(dominotree["dominotree@16"], "tps"), keyed(dominotree["chain"], "tps")
+    if comparison == "domino":
+        # DominoTree vs official Domino: raw per-prompt TPS, aligned by (sample_idx, turn_index)
+        # across the two harnesses (both share the lean common AR, so raw-TPS ratio == speedup ratio).
+        dt = {(int(r["sample_idx"]), int(r["turn_index"])): float(r["tps"])
+              for r in dominotree["dominotree@16"] if math.isfinite(float(r.get("tps", float("nan"))))}
+        dom = {(int(r["sample_idx"]), int(r["turn_index"])): float(r["tps"])
+               for r in data[temp][dataset]["domino_official"]["domino"]}
+        keys = sorted(set(dt) & set(dom))
+        return [(dt[k], dom[k]) for k in keys]
     else:
         left = speedup_by_exec(dominotree["dominotree@16"], dominotree["ar"])
         baseline_method = comparison  # ddtree_tb16 | caddtree | dflash — all DFlash-harness baselines
@@ -281,14 +355,15 @@ def pairwise_units(data: dict[str, Any], temp: str, dataset: str, comparison: st
     return [(left[idx], right[idx]) for idx in sorted(set(left) & set(right))]
 
 
-def write_pairwise(data: dict[str, Any], temps: list[str], out_dir: Path, bootstrap_iters: int, seed: int) -> None:
+def write_pairwise(data: dict[str, Any], temps: list[str], out_dir: Path, bootstrap_iters: int, seed: int, suffix: str = "") -> None:
     rng = random.Random(seed)
     # DFlash was added later; it draws from an independent stream so the original
     # three comparisons consume `rng` in the exact same order as before -> their
     # bootstrap CIs stay byte-identical, and DFlash is purely additive.
     rng_extra = random.Random(seed + 1)
+    rng_domino = random.Random(12345)  # official-Domino column (matches the paper's recompute seed)
     comparisons = [
-        ("chain", "DominoTree (16) vs Domino-chain", "raw per-prompt TPS (same harness)"),
+        ("domino", "DominoTree (16) vs Domino", "raw per-prompt TPS (shared lean common AR)"),
         ("ddtree_tb16", "DominoTree (16) vs DDTree@16", "speedup-over-own-AR (cross harness)"),
         ("caddtree", "DominoTree (16) vs CaDDTree", "speedup-over-own-AR (cross harness)"),
         ("dflash", "DominoTree (16) vs DFlash", "speedup-over-own-AR (cross harness)"),
@@ -309,12 +384,13 @@ def write_pairwise(data: dict[str, Any], temps: list[str], out_dir: Path, bootst
                 pairs = []
                 for ds in datasets:
                     pairs.extend(pairwise_units(data, temp, ds, key))
-                obs, lo, hi = paired_delta_ci(pairs, bootstrap_iters, rng_extra if key == "dflash" else rng)
+                rng_for = {"domino": rng_domino, "dflash": rng_extra}.get(key, rng)
+                obs, lo, hi = paired_delta_ci(pairs, bootstrap_iters, rng_for)
                 ci = f"[{fmt(lo)}, {fmt(hi)}]" if math.isfinite(lo) else "--"
                 lines.append("| " + " | ".join([temp, name, label, metric, str(len(pairs)), fmt(obs), ci]) + " |")
                 csv_rows.append({"temp": temp, "dataset_or_rollup": name, "comparison": label, "metric": metric, "n": len(pairs), "delta_pct": obs, "ci_low": lo, "ci_high": hi})
-    (out_dir / "pairwise_ci.md").write_text("\n".join(lines).rstrip() + "\n")
-    with (out_dir / "pairwise_ci.csv").open("w", newline="") as f:
+    (out_dir / f"pairwise_ci{suffix}.md").write_text("\n".join(lines).rstrip() + "\n")
+    with (out_dir / f"pairwise_ci{suffix}.csv").open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(csv_rows[0].keys()))
         writer.writeheader()
         writer.writerows(csv_rows)
@@ -435,15 +511,44 @@ def main() -> None:
     parser.add_argument("--bootstrap-iters", type=int, default=10000)
     parser.add_argument("--conditioning-ablation-bootstrap-iters", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--ar-norm", choices=["surgical", "common", "own"], default="surgical",
+                        help="Table 1 speedup normalization. 'surgical' (default): own-harness AR for "
+                             "everyone, except official Domino, whose anomalously-heavy own AR is "
+                             "replaced by the lean common AR (ours == CaDDTree's ~66). 'common': one "
+                             "lean AR for all. 'own': each method over its own harness AR (pre-correction).")
+    parser.add_argument("--domino-model-dir", default="qwen3-4b",
+                        help="Subdir of results/raw/domino_official/ holding the official Domino JSONLs "
+                             "(qwen3-4b or qwen3-8b).")
+    parser.add_argument("--domino-no-warmup", action="store_true",
+                        help="Set for models whose official Domino was collected WITHOUT an in-benchmark "
+                             "warmup (e.g. 8B): drops the first prompt. Default (4B) keeps all prompts.")
+    parser.add_argument("--no-warmup-drop", action="store_true",
+                        help="Do NOT drop the first DominoTree row per method (for warmup-enabled "
+                             "collections such as 8B). Default (4B frozen, no in-loop warmup) drops it.")
+    parser.add_argument("--table-suffix", default="",
+                        help="Filename suffix, e.g. '_8b' -> table1_8b.md / pairwise_ci_8b.md.")
     args = parser.parse_args()
 
     temps = [temp_token(t.strip()) for t in args.temps.split(",") if t.strip()]
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    data = collect_data(args.raw_dir, temps)
-    write_table1(data, temps, args.out_dir, args.model_label)
-    write_table2(data, temps, args.out_dir, args.raw_dir)
-    write_pairwise(data, temps, args.out_dir, args.bootstrap_iters, args.seed)
-    write_conditioning_ablation_table(args.raw_dir, args.out_dir, args.conditioning_ablation_bootstrap_iters)
+    data = collect_data(args.raw_dir, temps, model_dir=args.domino_model_dir,
+                        domino_warmup=not args.domino_no_warmup, dt_drop_first=not args.no_warmup_drop)
+
+    def safe(name, fn, *fa, **fk):
+        """Graceful degradation: build only tables whose inputs exist; report skips loudly."""
+        try:
+            fn(*fa, **fk)
+            print(f"[ok]   {name}")
+        except (FileNotFoundError, KeyError, IndexError, ZeroDivisionError) as ex:
+            print(f"[skip] {name}: missing/insufficient data ({type(ex).__name__}: {ex})")
+
+    safe("table1", write_table1, data, temps, args.out_dir, args.model_label, args.ar_norm, args.table_suffix)
+    safe("pairwise", write_pairwise, data, temps, args.out_dir, args.bootstrap_iters, args.seed, args.table_suffix)
+    safe("conditioning_ablation", write_conditioning_ablation_table, args.raw_dir, args.out_dir,
+         args.conditioning_ablation_bootstrap_iters)
+    # NOTE: the per-round stage-time table (former Table 2) is intentionally not built: official
+    # Domino times all post-draft work as one fused block, so there is no DominoTree-vs-Domino
+    # stage-level split at parity. Build cost is reported via the Python-vs-GPU-native builder table.
     manifest = {
         "raw_dir": str(args.raw_dir),
         "temps": temps,

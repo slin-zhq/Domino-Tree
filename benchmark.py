@@ -7,9 +7,11 @@ Methods:
   marg@B   : marginal-tree DDTree analogue over Domino base logits
   cond@B   : DominoTree conditional best-first tree with per-node GRU correction
 
-The public v1 intentionally ships only the pure-Python best-first tree backend.
-CUDA/star, wave/condwave, beam, hybrid, and adaptive experimental paths from the
-research branch are not exposed here.
+DominoTree's default builder is the GPU-native CUDA-graph node expander
+(dominotree_gpu.GraphNodeExpander); pass --python-builder for the pure-Python
+reference builder (identical trees, higher build cost). The star/wave/condwave,
+beam, hybrid, and adaptive experimental paths from the research branch are not
+exposed here.
 """
 
 from __future__ import annotations
@@ -59,10 +61,19 @@ def parse_args() -> argparse.Namespace:
         "--gpu-native-build",
         action="store_true",
         help=(
-            "Opt-in: build the dominotree method's conditional children via the CUDA-graph "
-            "node expander (dominotree_gpu.GraphNodeExpander) instead of the pure-Python "
-            "children_fn. Must produce identical trees (same out_sig at T=0); the pure-Python "
-            "path remains the default. DOMINOTREE_GPU_EAGER=1 disables graph capture (debug)."
+            "(Default; kept for backward compatibility.) Build the dominotree conditional "
+            "children via the CUDA-graph node expander (dominotree_gpu.GraphNodeExpander). "
+            "This is now the default builder; pass --python-builder to opt out."
+        ),
+    )
+    parser.add_argument(
+        "--python-builder",
+        action="store_true",
+        help=(
+            "Opt out of the default GPU-native builder and use the pure-Python reference "
+            "children_fn (produces identical trees at higher build cost). "
+            "DOMINOTREE_GPU_EAGER=1 instead keeps the GPU-native expander but disables graph "
+            "capture (debug)."
         ),
     )
     return parser.parse_args()
@@ -77,12 +88,15 @@ def main() -> None:
     if unknown:
         raise SystemExit(f"unknown methods: {unknown}; allowed={sorted(allowed)}")
 
+    # GPU-native builder is the default; --python-builder opts out.
+    use_gpu_native = not args.python_builder
+
     if args.sample_draft and args.temperature < 1e-5:
         print("[info] --sample-draft has no effect at temperature<1e-5 (sampling reduces to argmax).")
-    if args.sample_draft and args.gpu_native_build and "dominotree" in methods:
-        print("[warn] --sample-draft is not applied to the dominotree tree under --gpu-native-build: "
-              "the GPU-native builder is deterministic. The chain draft is still sampled; use the "
-              "default Python builder if you want sampled tree candidates.")
+    if args.sample_draft and use_gpu_native and "dominotree" in methods:
+        print("[warn] --sample-draft is not applied to the dominotree tree under the GPU-native "
+              "builder: it is deterministic. The chain draft is still sampled; pass --python-builder "
+              "if you want sampled tree candidates.")
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
@@ -124,22 +138,26 @@ def main() -> None:
     eos = tokenizer.eos_token_id
 
     graph_expander = None
-    if args.gpu_native_build and "dominotree" in methods:
-        import dominotree_gpu
+    if use_gpu_native and "dominotree" in methods:
+        try:
+            import dominotree_gpu
 
-        graph_expander = dominotree_gpu.GraphNodeExpander(
-            target=target,
-            draft=draft,
-            k_draft=k_draft,
-            prefix_len=prefix_len,
-            node_topk=args.node_topk,
-            corr_topm=args.corr_topm,
-            device=device,
-        )
-        print(
-            f"[gpu-native-build] node expander active: graphs={'on' if graph_expander.use_graphs else 'OFF (eager-static)'} "
-            f"k_draft={k_draft} node_topk={args.node_topk} corr_topm={args.corr_topm} prefix_len={prefix_len}"
-        )
+            graph_expander = dominotree_gpu.GraphNodeExpander(
+                target=target,
+                draft=draft,
+                k_draft=k_draft,
+                prefix_len=prefix_len,
+                node_topk=args.node_topk,
+                corr_topm=args.corr_topm,
+                device=device,
+            )
+            print(
+                f"[gpu-native-build] node expander active (default): graphs={'on' if graph_expander.use_graphs else 'OFF (eager-static)'} "
+                f"k_draft={k_draft} node_topk={args.node_topk} corr_topm={args.corr_topm} prefix_len={prefix_len}"
+            )
+        except Exception as exc:  # pragma: no cover - hardware/deps dependent
+            print(f"[gpu-native-build] unavailable ({exc}); falling back to the pure-Python builder")
+            graph_expander = None
 
     dataset = load_and_process_dataset(args.dataset)
     if args.max_samples and len(dataset) > args.max_samples:
@@ -373,7 +391,7 @@ def main() -> None:
                     "mean_accept": statistics.fmean(accs) if accs else 0.0,
                     "out_sig": out_sig,
                     "out_head": out_head,
-                    "gpu_native_build": bool(args.gpu_native_build),
+                    "gpu_native_build": bool(graph_expander is not None),
                 }
                 rec.update({f"ms_{key}": value for key, value in ms.items()})
                 records.append(rec)
