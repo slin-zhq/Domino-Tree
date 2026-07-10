@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <em>Paper (arXiv) link coming soon.</em>
+  <a href="https://arxiv.org/abs/2607.08642">arXiv:2607.08642</a>
 </p>
 
 ## Prerequisites / Getting the Domino drafter
@@ -162,6 +162,7 @@ adaptive conditional stopping are future work and not part of this release.
   title={DominoTree: Conditional Tree-Structured Drafting with Domino for Speculative Decoding},
   author={Lin, Saw S.},
   year={2026},
-  note={arXiv preprint; link to be added on release}
+  journal={arXiv preprint arXiv:2607.08642},
+  url={https://arxiv.org/abs/2607.08642}
 }
 ```
