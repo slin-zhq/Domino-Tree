@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dominotree-sglang"
+version = "0.1.0"
+description = "Out-of-tree SGLang plugin: Domino block-parallel drafter with a GRU correction head (Phase 1, chain draft), registered as the DOMINO speculative algorithm."
+readme = "PORT_NOTES.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "DominoTree" }]
+keywords = ["sglang", "speculative-decoding", "domino", "dflash"]
+
+# NOTE: sglang, torch, and triton are intentionally NOT listed. This plugin is
+# only ever imported inside an environment where a matching SGLang (and its
+# torch/triton stack) is already installed; pinning them here would risk
+# clobbering the host's carefully-matched CUDA wheels.
+dependencies = []
+
+[project.entry-points."sglang.srt.plugins"]
+dominotree = "dominotree_sglang:register_plugin"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["dominotree_sglang*"]
