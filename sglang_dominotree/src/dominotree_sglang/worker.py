@@ -220,6 +220,13 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         self.tree_prefix_len = int(getattr(self.draft_model, "pure_draft_prefix_len", 1))
         self.tree_num_branch = _env_int("DOMINOTREE_NUM_BRANCH", 2)
 
+        # P4: GPU-native CUDA-graph node expander (default ON; 0 = P3 pure-Python).
+        # Constructed + captured LAZILY on first decode (needs the loaded model +
+        # a live CUDA context, mid-run, without colliding with SGLang init).
+        self.tree_gpu_builder = _env_int("DOMINOTREE_GPU_BUILDER", 1) != 0
+        self._gpu_expander = None
+        self._gpu_expander_failed = False
+
         self.tree_topology = None
         # `domino_rollout is not None` <=> the draft model has the Domino
         # projector (prefix_gru + embed_proj), which BOTH builders require.
@@ -405,7 +412,62 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         branch = torch.where(top2[:, :, 0] != c_head, top2[:, :, 0], top2[:, :, 1])
         return branch  # [bs, b]
 
-    # -- conditional best-first tree (P3, DEFAULT) -------------------------
+    # -- conditional best-first tree (P3 pure-Python / P4 GPU expander) ----
+
+    def _effective_node_topk(self):
+        """node_topk clamped to <= corr_topm (matches the pure-Python scorer +
+        the GPU expander's constructor precondition)."""
+        node_topk = int(self.tree_node_topk)
+        if self.tree_corr_topm > 0:
+            node_topk = min(node_topk, int(self.tree_corr_topm))
+        return node_topk
+
+    def _get_gpu_expander(self):
+        """Lazily build + capture the CUDA-graph node expander (P4) on first
+        decode. Returns None (once) if unavailable so we fall back to the
+        pure-Python conditional builder.
+
+        Constructed mid-run: graph capture needs the loaded model + a live CUDA
+        context and must not collide with SGLang init. It captures 3 graphs on a
+        side stream in inference_mode; safe under --disable-cuda-graph (the model
+        is not graphed) and independent of the Domino rollout's own graph.
+        """
+        if self._gpu_expander is not None or self._gpu_expander_failed:
+            return self._gpu_expander
+        try:
+            from .tree.gpu_expander import GraphNodeExpander
+
+            n = int(self.block_size)
+            shift_label = bool(getattr(self.draft_model, "shift_label", False))
+            k_draft = n if shift_label else n - 1
+            embed_tokens = self.target_worker.model_runner.model.get_input_embeddings()
+            self._gpu_expander = GraphNodeExpander(
+                draft=self.draft_model,
+                embed_tokens=embed_tokens,
+                k_draft=k_draft,
+                prefix_len=self.tree_prefix_len,
+                node_topk=self._effective_node_topk(),
+                corr_topm=self.tree_corr_topm,
+                device=self.device,
+            )
+            logger.info(
+                "DOMINOTREE GPU node expander ready (use_graphs=%s, k_draft=%d, "
+                "node_topk=%d, corr_topm=%d, prefix_len=%d).",
+                self._gpu_expander.use_graphs,
+                k_draft,
+                self._effective_node_topk(),
+                self.tree_corr_topm,
+                self.tree_prefix_len,
+            )
+        except Exception as e:
+            self._gpu_expander_failed = True
+            self._gpu_expander = None
+            logger.warning(
+                "DOMINOTREE GPU node expander unavailable; using pure-Python "
+                "conditional builder. Reason: %s",
+                e,
+            )
+        return self._gpu_expander
 
     def _build_conditional_tree_for_req(self, draft_hidden_1, verified_scalar):
         """Build one request's conditional best-first tree (batch=1).
@@ -448,16 +510,42 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         )
         _, root_state = draft_model.prefix_gru(root_emb)  # (1, 1, gru_dim)
 
-        children_fn = make_conditional_children_fn(
-            ph=ph,
-            base_logits=base_logits,
-            draft_model=draft_model,
-            embed_tokens=embed_tokens,
-            node_topk=self.tree_node_topk,
-            corr_topm=self.tree_corr_topm,
-            prefix_len=self.tree_prefix_len,
-            device=device,
-        )
+        # children_fn: P4 GPU CUDA-graph expander (default) or P3 pure-Python.
+        # The GPU expander is bit-equivalent to make_conditional_children_fn (its
+        # own equivalence suite proves it), so acceptance is unchanged.
+        expander = self._get_gpu_expander() if self.tree_gpu_builder else None
+        if expander is not None and (
+            ph.dtype != expander.S_ph_all.dtype
+            or base_logits.dtype != expander.S_base_all.dtype
+        ):
+            # Draft-hidden and lm_head are normally the same server dtype (bf16),
+            # so this should not trigger; if it does (mixed dtypes), fall back to
+            # pure-Python rather than let the expander's no-silent-cast guard
+            # raise mid-decode.
+            logger.warning(
+                "DOMINOTREE GPU expander dtype mismatch (ph=%s base_logits=%s vs "
+                "expander=%s); using pure-Python conditional builder.",
+                ph.dtype,
+                base_logits.dtype,
+                expander.S_ph_all.dtype,
+            )
+            self._gpu_expander_failed = True
+            self._gpu_expander = None
+            expander = None
+        if expander is not None:
+            expander.begin_round(ph, base_logits)
+            children_fn = expander.children_fn
+        else:
+            children_fn = make_conditional_children_fn(
+                ph=ph,
+                base_logits=base_logits,
+                draft_model=draft_model,
+                embed_tokens=embed_tokens,
+                node_topk=self._effective_node_topk(),
+                corr_topm=self.tree_corr_topm,
+                prefix_len=self.tree_prefix_len,
+                device=device,
+            )
 
         # budget = N-1 so root + (N-1) nodes = N (the DFLASH-reserved width).
         nodes = build_best_first_tree(

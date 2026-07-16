@@ -523,3 +523,94 @@ Validation (P3 is lossless by construction — do NOT byte-compare vs DOMINO):
 coherent+correct output, and `spec_accept_length` ≥ the toy tree's
 (`DOMINOTREE_BUILDER=toy DOMINOTREE_NUM_BRANCH=2`, which was ~3.4). `corr_topm=0`
 exercises the full-vocab correction path.
+
+---
+
+# Phase 4 (part 1) — GPU-native CUDA-graph node expander
+
+Replaces P3's per-node eager GRU-correction (many small kernel launches + a
+GPU→CPU sync per heap pop) with `dominotree_gpu.py`'s CUDA-graph replay: the
+systems contribution that turns the accept-length win into a per-step-latency
+win. The best-first heap stays in Python (data-dependent); only the fixed-shape
+per-node math inside `children_fn` is graphed.
+
+## New file / additions
+
+| File | Role |
+|---|---|
+| `tree/gpu_expander.py` | `GraphNodeExpander` ported near-verbatim from `dominotree_gpu.py` (3 captured graphs: setup / corr / base-expand; static-buffer copy-in → replay → read-out). Bundles the reference equivalence suite (adapted to this package's modules). |
+| `worker.py` | lazy `_get_gpu_expander()` + `_effective_node_topk()`; `_build_conditional_tree_for_req` uses `expander.begin_round(ph, base_logits)` + `expander.children_fn` when available, else P3 pure-Python. |
+
+## The `embed_tokens` adaptation (the ONE change vs the reference)
+
+The reference `_expand_impl` hardcodes `self.target.model.embed_tokens(toks)`. The
+SGLang target exposes its embedding via `get_input_embeddings()`, so the port
+drops the `target` ctor arg, takes an `embed_tokens` module argument, and calls
+`self.embed_tokens(toks)`. `draft` is our `DominoDraftModel` (already has
+`prefix_gru` + `embed_proj`); `dtype/gru_dim/vocab/mlp_dim/hidden` are inferred
+exactly as the reference. Nothing else changed — the math is byte-identical, so
+the equivalence suite still proves it matches the pure-Python scorer.
+
+## Where/when the expander is constructed + captured
+
+**Lazily, on first decode**, in `_get_gpu_expander()` (cached on `self`,
+constructed at most once; a construction/capture failure sets a flag and falls
+back to pure-Python for the rest of the run). It is built inside
+`_build_conditional_tree_for_req`, i.e. **after** the draft-block forward and
+**before** the target verify. Capture is cleanly bracketed:
+`_capture()` first `torch.cuda.synchronize()` (drains the draft forward), warms
+up the exact graph bodies 3× on a **side stream** in `torch.inference_mode()`,
+re-syncs, then records each graph with `torch.cuda.graph(...)` on the default
+stream (no other work is submitted — the worker is single-threaded/synchronous
+under `--disable-cuda-graph`), then syncs again. This mirrors how the Domino
+rollout captures its own graph mid-run; the two never coexist here because the
+conditional path never calls `rollout_draft_block` (that's the toy/chain path).
+
+## GPU-vs-pure-Python gating
+
+`DOMINOTREE_GPU_BUILDER` (default `1` = GPU expander; `0` = P3 pure-Python).
+`DOMINOTREE_GPU_EAGER=1` runs the expander's graph bodies eagerly (no capture) —
+a GPU debugging fallback that is still bit-equivalent. `node_topk` is clamped to
+`≤ corr_topm` (`_effective_node_topk()`) for BOTH paths so they stay identical
+and the expander's constructor precondition holds. `DOMINOTREE_BUILDER=toy` (P2)
+and the Domino-chain fallback remain reachable. **Acceptance must be unchanged**
+vs P3 (3.92) — the expander is bit-equivalent by construction; a different number
+is a port bug.
+
+## dtype reconciliation
+
+The expander's static buffers use `dtype = next(draft.parameters()).dtype`, and
+`begin_round` **raises** on a `ph`/`base_logits` dtype mismatch (a silent cast
+would change numerics). In the standard config the draft model and the target
+`lm_head` are the same server dtype (bf16), so `ph` (draft-hidden dtype) and
+`base_logits = ph_cast @ lm_head.weight.T` (lm_head dtype) both equal the buffer
+dtype — no mismatch. As belt-and-suspenders the worker checks the dtypes before
+`begin_round` and falls back to pure-Python (with a warning) instead of letting
+the guard raise mid-decode.
+
+## Local self-test status
+
+`python -m dominotree_sglang.tree.gpu_expander` runs the equivalence suite
+(CPU eager-static vs pure-Python; +CUDA graph-replay vs pure-Python when a GPU is
+present). **Not runnable on the dev Mac (no torch)** — run it on MIRLab. The port
+was verified statically: each graph body (`_setup/_corr/_corr_full/_base_expand/_expand`)
+matches both the reference GPU bodies and this package's `conditional_children.py`
+op-for-op; the only edit is the `embed_tokens` handle.
+
+## Top-3 GPU risks to validate (MIRLab, 4B/TP=1, --disable-cuda-graph)
+
+1. **CUDA-graph capture coexistence.** The #1 risk: 3 graphs captured mid-run on
+   a side stream. Confirm capture doesn't collide with anything (it's bracketed
+   by syncs; SGLang model graphs are off; the rollout graph is never captured in
+   the conditional path) and leaves the default stream clean. Watch for capture
+   errors from the cuDNN GRU (the 3× warmup primes its workspace/algo — the same
+   pattern the P1 rollout uses successfully) and from `VocabParallelEmbedding`
+   (graph-safe at TP=1: direct lookup, no all-reduce).
+2. **Equivalence.** `accept_length` from the GPU builder MUST equal the
+   pure-Python 3.92 (a delta = a port/capture bug). First run
+   `DOMINOTREE_GPU_EAGER=1` (eager-static, no capture) to isolate math from
+   capture, then the captured path; also run `python -m dominotree_sglang.tree.gpu_expander`.
+3. **Latency actually improves.** The point of P4 is fewer launches + the per-pop
+   sync collapsing to one small D→H copy per corr pop. Confirm per-step latency /
+   TPS drops vs P3 (the accept-length win becoming a real throughput win); the
+   `corr_topm=0` full-vocab path is heavier — check both `corr_topm=64` and `0`.
