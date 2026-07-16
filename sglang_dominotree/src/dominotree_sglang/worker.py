@@ -174,17 +174,27 @@ def _compact_accept_to_front(
 class DominoTreeWorkerV2(DominoWorkerV2):
     """DFLASH-drafter worker whose *verify* is an EAGLE tree instead of a chain.
 
-    Phase 2 plumbing proof. The Domino block-parallel DRAFT is unchanged; only
-    the decode-time verify is swapped from DFLASH's linear chain to a small fixed
-    tree run through EAGLE's tree verifier (``eagle_prepare_for_verify`` ->
-    target verify -> ``eagle_sample``), with the accepted path compacted to a
-    prefix (EAGLE's ``move_accept_tokens_to_target_kvcache`` +
-    ``_compact_accept_to_front``) so DFLASH's prefix-only draft-KV writer can be
-    reused verbatim.
+    The Domino block-parallel DRAFT is unchanged; only the decode-time verify is
+    swapped from DFLASH's linear chain to a tree run through EAGLE's tree verifier
+    (``eagle_prepare_for_verify`` -> target verify -> ``eagle_sample``), with the
+    accepted path compacted to a prefix (EAGLE's
+    ``move_accept_tokens_to_target_kvcache`` + ``_compact_accept_to_front``) so
+    DFLASH's prefix-only draft-KV writer is reused verbatim.
 
-    Constraints (Phase 2): T=0 greedy only, TP=1 only, page_size==1, non-mamba
-    target, no compact-draft-cache window. Anything else falls back to the
-    lossless Domino chain (``DominoWorkerV2``). See PORT_NOTES.md.
+    Two tree builders share that verify seam:
+
+    * **conditional (P3, DEFAULT)** — the paper's method: a per-request adaptive,
+      variable-width **best-first** tree built by the Domino GRU-correction scorer
+      (``tree/best_first.py`` + ``tree/conditional_children.py``). Env
+      ``DOMINOTREE_NODE_TOPK`` (8), ``DOMINOTREE_CORR_TOPM`` (64; 0=full-vocab),
+      ``prefix_len = draft_model.pure_draft_prefix_len``, budget = block_size-1.
+    * **toy (P2, A/B via ``DOMINOTREE_BUILDER=toy``)** — a fixed caterpillar tree.
+
+    Losslessness is BY CONSTRUCTION for both (greedy tree verify only accepts
+    argmax-matching tokens). Constraints: T=0 greedy only, TP=1 only (the builder
+    reads the dense LM head + runs a per-node GRU on the host), page_size==1,
+    non-mamba target, no compact-draft-cache window, ``--disable-cuda-graph``.
+    Anything else falls back to the lossless Domino chain. See PORT_NOTES.md.
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -192,22 +202,31 @@ class DominoTreeWorkerV2(DominoWorkerV2):
 
         # Verify node budget N == DFLASH block_size, so ALL DFLASH KV/buffer
         # sizing (reserved per-decode tokens, cuda-graph widths) is reused with
-        # no server-arg override. The tree is: root + (N-1-B) spine (Domino
-        # chain) + B branch siblings at the shallowest depths.
+        # no server-arg override.
         self._warned_tree_greedy_only = False
         self.tree_num_nodes = int(self.block_size)
-        try:
-            self.tree_num_branch = int(os.environ.get("DOMINOTREE_NUM_BRANCH", "2"))
-        except ValueError:
-            self.tree_num_branch = 2
+
+        def _env_int(name, default):
+            try:
+                return int(os.environ.get(name, str(default)))
+            except ValueError:
+                return default
+
+        # P3 conditional best-first builder is the DEFAULT; DOMINOTREE_BUILDER=toy
+        # keeps the P2 fixed caterpillar reachable for A/B.
+        self.tree_builder = os.environ.get("DOMINOTREE_BUILDER", "conditional").strip()
+        self.tree_node_topk = _env_int("DOMINOTREE_NODE_TOPK", 8)
+        self.tree_corr_topm = _env_int("DOMINOTREE_CORR_TOPM", 64)
+        self.tree_prefix_len = int(getattr(self.draft_model, "pure_draft_prefix_len", 1))
+        self.tree_num_branch = _env_int("DOMINOTREE_NUM_BRANCH", 2)
 
         self.tree_topology = None
+        # `domino_rollout is not None` <=> the draft model has the Domino
+        # projector (prefix_gru + embed_proj), which BOTH builders require.
         if self.domino_rollout is not None:
             from .tree.toy_tree import build_topology
 
-            # Clamp branches so the spine keeps at least ~half the block: the
-            # spine must stay well above the measured chain acceptance for the
-            # "tree accept >= chain accept" property to hold in practice.
+            # Clamp branches so the toy spine keeps >= ~half the block.
             max_branch = max(0, (self.tree_num_nodes - 1) // 2)
             if self.tree_num_branch > max_branch:
                 logger.warning(
@@ -221,12 +240,17 @@ class DominoTreeWorkerV2(DominoWorkerV2):
                 num_nodes=self.tree_num_nodes, num_branch=self.tree_num_branch
             )
             logger.info(
-                "DominoTreeWorkerV2 ready: N=%d nodes, spine_len=%d, num_branch=%d, "
-                "max_depth=%d.",
-                self.tree_topology.num_nodes,
+                "DominoTreeWorkerV2 ready: builder=%s, N=%d, node_topk=%d, "
+                "corr_topm=%d, prefix_len=%d, shift_label=%s (toy: spine_len=%d, "
+                "num_branch=%d).",
+                self.tree_builder,
+                self.tree_num_nodes,
+                self.tree_node_topk,
+                self.tree_corr_topm,
+                self.tree_prefix_len,
+                bool(getattr(self.draft_model, "shift_label", False)),
                 self.tree_topology.spine_len,
                 self.tree_topology.num_branch,
-                self.tree_topology.max_depth,
             )
 
     def forward_batch_generation(self, model_worker_batch, on_publish=None):
@@ -333,17 +357,33 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         draft_hidden = draft_out.hidden_states
         if draft_hidden is None:
             raise RuntimeError("DOMINOTREE draft model returned no hidden states.")
-        draft_hidden = draft_hidden.reshape(bs, n, -1)
+        return draft_hidden.reshape(bs, n, -1)  # [bs, N, H]
 
-        # Spine tokens: the Domino GRU-corrected chain (same as Phase 1).
+    # -- toy caterpillar tree (P2, A/B via DOMINOTREE_BUILDER=toy) ----------
+
+    def _toy_tree_tokens(self, draft_hidden, verified, bs, device):
+        """Assemble the P2 fixed caterpillar tree tokens + intra mask."""
+        from .tree.toy_tree import build_draft_tokens, build_intra_tree_mask
+
+        target_model = self.target_worker.model_runner.model
         lm_head = getattr(target_model, "lm_head", None)
         spine_tokens = self.domino_rollout.rollout_draft_block(
             draft_hidden=draft_hidden,
             verified_id=verified,
             target_model=target_model,
             lm_head=lm_head,
-        )  # [bs, n-1]
-        return spine_tokens, draft_hidden
+        )  # [bs, N-1]
+        branch_tokens = self._branch_candidates(draft_hidden, spine_tokens)
+        if branch_tokens is None:
+            branch_tokens = torch.empty((bs, 0), dtype=torch.int64, device=device)
+        draft_tokens_2d = build_draft_tokens(
+            self.tree_topology,
+            verified_id=verified,
+            spine_tokens=spine_tokens,
+            branch_tokens=branch_tokens,
+        )  # [bs, N]
+        intra_mask = build_intra_tree_mask(self.tree_topology, bs=bs, device=device)
+        return draft_tokens_2d, intra_mask
 
     def _branch_candidates(self, draft_hidden, spine_tokens):
         """2nd-candidate tokens for the branch depths (TP=1 dense LM head)."""
@@ -365,6 +405,100 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         branch = torch.where(top2[:, :, 0] != c_head, top2[:, :, 0], top2[:, :, 1])
         return branch  # [bs, b]
 
+    # -- conditional best-first tree (P3, DEFAULT) -------------------------
+
+    def _build_conditional_tree_for_req(self, draft_hidden_1, verified_scalar):
+        """Build one request's conditional best-first tree (batch=1).
+
+        Returns ``(tokens[N], parent[N], depth[N])`` PADDED to exactly N nodes,
+        where index 0 is the root (= verified token). Short trees are padded with
+        DEAD leaf nodes (children of root carrying ``mask_token_id``) that can
+        never match the target's greedy argmax and are leaves, so they can never
+        be accepted and never alter the accepted path.
+
+        ``draft_hidden_1`` is ``[N, H]`` (this request's draft-block hidden);
+        ``verified_scalar`` is the committed root token id.
+        """
+        from .tree.best_first import build_best_first_tree
+        from .tree.conditional_children import make_conditional_children_fn
+
+        n = int(self.block_size)
+        device = self.device
+        target_model = self.target_worker.model_runner.model
+        embed_tokens = target_model.get_input_embeddings()
+        lm_head = target_model.lm_head
+        draft_model = self.draft_model
+        shift_label = bool(getattr(draft_model, "shift_label", False))
+
+        # ph: per-position draft hidden, shift_label-sliced (domino_adapter.py:92-96).
+        #   shift_label=False -> last (N-1) rows = draft_hidden[1:]  (k_draft=N-1)
+        #   shift_label=True  -> all N rows                          (k_draft=N)
+        if shift_label:
+            ph = draft_hidden_1
+        else:
+            ph = draft_hidden_1[-(n - 1):]
+        # base_logits = target.lm_head(ph) (domino_adapter.py:95); TP=1 dense head.
+        weight = lm_head.weight  # [V, H] full at TP=1
+        ph_cast = ph.to(weight.dtype) if ph.dtype != weight.dtype else ph
+        base_logits = torch.matmul(ph_cast, weight.T)  # [k_draft, V]
+
+        # root_state = prefix_gru(embed_tokens(verified)) hidden (domino_adapter.py:97).
+        root_emb = embed_tokens(
+            torch.tensor([[int(verified_scalar)]], device=device, dtype=torch.long)
+        )
+        _, root_state = draft_model.prefix_gru(root_emb)  # (1, 1, gru_dim)
+
+        children_fn = make_conditional_children_fn(
+            ph=ph,
+            base_logits=base_logits,
+            draft_model=draft_model,
+            embed_tokens=embed_tokens,
+            node_topk=self.tree_node_topk,
+            corr_topm=self.tree_corr_topm,
+            prefix_len=self.tree_prefix_len,
+            device=device,
+        )
+
+        # budget = N-1 so root + (N-1) nodes = N (the DFLASH-reserved width).
+        nodes = build_best_first_tree(
+            children_fn, root_state, budget=n - 1, max_depth=n
+        )
+
+        tokens = [int(verified_scalar)]
+        parent = [-1]
+        depth = [0]
+        for nd in nodes:
+            tokens.append(int(nd.token))
+            # flat parent: root (flat 0) if node.parent == -1, else 1 + node.parent.
+            parent.append(0 if nd.parent == -1 else 1 + int(nd.parent))
+            depth.append(1 + int(nd.depth))  # flat tree-depth = node.depth + 1
+        # Pad short trees with dead leaves = children of root carrying mask_token_id.
+        while len(tokens) < n:
+            tokens.append(int(self._mask_token_id))
+            parent.append(0)
+            depth.append(1)
+        return tokens[:n], parent[:n], depth[:n]
+
+    def _build_conditional_trees(self, draft_hidden, verified, bs, n, device):
+        """Build a per-request conditional tree; return (draft_tokens[bs,N], intra_mask[bs,N,N])."""
+        from .tree.toy_tree import build_intra_tree_mask_from_parents
+
+        all_tokens = []
+        all_parents = []
+        for b in range(bs):
+            tokens, parent, _depth = self._build_conditional_tree_for_req(
+                draft_hidden[b], int(verified[b].item())
+            )
+            all_tokens.append(tokens)
+            all_parents.append(parent)
+        draft_tokens_2d = torch.tensor(
+            all_tokens, dtype=torch.int64, device=device
+        )  # [bs, N]
+        intra_mask = build_intra_tree_mask_from_parents(
+            all_parents, n=n, device=device
+        )  # [bs, N, N]
+        return draft_tokens_2d, intra_mask
+
     # -- decode + tree verify ---------------------------------------------
 
     def _tree_decode_forward(self, model_worker_batch, on_publish):
@@ -381,11 +515,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             move_accept_tokens_to_target_kvcache,
         )
 
-        from .tree.toy_tree import (
-            build_draft_tokens,
-            build_full_attention_mask,
-            build_intra_tree_mask,
-        )
+        from .tree.toy_tree import build_full_attention_mask
 
         device = self.device
         batch = model_worker_batch
@@ -394,22 +524,20 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         prefix_lens = batch.seq_lens
         draft_input = batch.spec_info
         verified = draft_input.verified_id.view(-1)
-        topo = self.tree_topology
 
-        # 1) Domino block draft -> spine chain + branch candidates.
-        spine_tokens, draft_hidden = self._domino_draft_block(batch)
-        branch_tokens = self._branch_candidates(draft_hidden, spine_tokens)
-        if branch_tokens is None:
-            branch_tokens = torch.empty((bs, 0), dtype=torch.int64, device=device)
+        # 1) Domino block draft (raw per-position hidden).
+        draft_hidden = self._domino_draft_block(batch)  # [bs, N, H]
 
-        # 2) Assemble tree tokens + intra-tree ancestor mask.
-        draft_tokens_2d = build_draft_tokens(
-            topo,
-            verified_id=verified,
-            spine_tokens=spine_tokens,
-            branch_tokens=branch_tokens,
-        )  # [bs, n]
-        intra_mask = build_intra_tree_mask(topo, bs=bs, device=device)  # [bs,n,n]
+        # 2) Assemble the tree: DEFAULT = per-request conditional best-first tree
+        # (P3, the paper's method); DOMINOTREE_BUILDER=toy = P2 fixed caterpillar.
+        if self.tree_builder == "toy":
+            draft_tokens_2d, intra_mask = self._toy_tree_tokens(
+                draft_hidden, verified, bs, device
+            )
+        else:
+            draft_tokens_2d, intra_mask = self._build_conditional_trees(
+                draft_hidden, verified, bs, n, device
+            )
 
         # 3) Derive positions + retrieve links from the intra mask (NGRAM path).
         positions = torch.empty((bs * n,), dtype=torch.int64, device=device)

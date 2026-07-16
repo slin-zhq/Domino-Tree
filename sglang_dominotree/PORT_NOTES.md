@@ -402,3 +402,124 @@ temperature 0 against: (a) plain AR (no spec), (b)
 `--speculative-algorithm DOMINO` — output must be byte-identical to both, and
 `spec_accept_length` must be ≥ the DOMINO run's. Set `DOMINOTREE_NUM_BRANCH=0`
 for the guaranteed chain-as-tree sanity baseline first.
+
+---
+
+# Phase 3 — conditional best-first tree (the paper's actual builder)
+
+P3 replaces P2's fixed caterpillar with DominoTree's **per-request adaptive,
+variable-width, best-first** tree, built by the Domino GRU-correction scorer,
+and feeds it through the **exact same** P2 verify seam (reconstruct_indices →
+`EagleVerifyInput` tree_topk=-1 → eagle_prepare_for_verify → target verify →
+eagle_sample → move_accept + KV commit). Conditional is now the DEFAULT
+DOMINOTREE path; `DOMINOTREE_BUILDER=toy` keeps the P2 caterpillar for A/B.
+
+## New files / additions
+
+| File | Role |
+|---|---|
+| `tree/best_first.py` | `TreeNode` + `build_best_first_tree` — ported VERBATIM from `dominotree.py` (heap over cumulative drafter log-prob; `parent < i` topological invariant). |
+| `tree/conditional_children.py` | `make_conditional_children_fn` + `log_prob_topk` — ported op-for-op from `domino_adapter.py:120-194`, GREEDY/T=0 only, all 3 correction cases. |
+| `tree/toy_tree.py` | added `build_intra_tree_mask_from_parents` (per-request parent-array → ancestor mask). |
+| `worker.py` | `_domino_draft_block` now returns raw `draft_hidden` only; added `_build_conditional_tree_for_req`, `_build_conditional_trees`, `_toy_tree_tokens`; `_tree_decode_forward` dispatches on `tree_builder`. |
+
+## How ph / base_logits / root_state are computed (with shift_label)
+
+Per request (batch=1 slice `draft_hidden[b]` = `[N, H]`), mirroring
+`domino_adapter.draft_block` (`:92-97`):
+
+- **ph** (per-position draft hidden for the GRU correction): shift_label slice.
+  `shift_label=False` → `ph = draft_hidden[b][-(N-1):]` (rows 1..N-1, `k_draft=N-1`);
+  `shift_label=True` → `ph = draft_hidden[b]` (all N rows, `k_draft=N`). The public
+  Qwen3-Domino checkpoints are shift_label=False, so k_draft = block_size-1.
+- **base_logits** = `target.lm_head(ph)` → `[k_draft, V]`. Computed as
+  `ph @ lm_head.weight.T` (TP=1 dense head; `matmul` in the head dtype, cast to
+  float inside the scorer as the reference does).
+- **root_state** = `draft_model.prefix_gru(target_embed_tokens(verified))[1]` →
+  `(1,1,gru_dim)`, the GRU hidden after consuming ONLY the committed root token
+  (recomputed fresh each round; no cross-round carry — contract §2.4).
+
+The scorer's per-node GRU correction uses `draft_model.prefix_gru` +
+`draft_model.embed_proj` + the **target** `embed_tokens` table exactly as the
+reference; the 3 cases (depth<prefix_len uncorrected; depth≥prefix_len with
+corr_topm>0 restricted; corr_topm==0 full-vocab) are transcribed line-for-line.
+`node_topk` is clamped to `≤ corr_topm` when corr_topm>0 (dominotree_gpu.py:79-80).
+
+## Tree budget / sizing
+
+`build_best_first_tree(children_fn, root_state, budget=N-1, max_depth=N)` with
+`N = block_size`. budget=N-1 draft nodes + the implicit root = N flat positions =
+the DFLASH-reserved verify width, so **all P2 KV/buffer sizing is reused
+unchanged**. Because a node at depth d needs d+1 nodes on its root path (all
+counted against budget), the deepest reachable node is depth N-2 → flat tree-depth
+N-1 → RoPE position L+(N-1), always within the N reserved slots. (max_depth=N is
+the loop bound; children_fn's `depth ≥ k_draft` check is the real cap.)
+
+## Padding scheme for short trees
+
+The heap can yield `< N-1` nodes (narrow node_topk / shallow depth). The flat
+tree is padded to exactly N nodes with **dead leaves**: `token = mask_token_id`,
+`parent = 0` (child of root), `depth = 1`. These are safe by construction:
+- they are leaves (no children), so acceptance can never extend through them;
+- their token is `mask_token_id`, which the target's greedy argmax never emits
+  mid-sequence, so they never match `target_predict[root]` and are never the
+  accepted child;
+- they only add siblings under the root, which `verify_tree_greedy` skips over
+  when finding the argmax-matching child — they cannot alter the accepted path,
+  positions, or retrieve links.
+Validated offline: flat parent arrays stay topological (`parent[i] < i`),
+root-reachable, cycle-free, with `depth[i] == ancestor-count(i)` including full
+and empty trees.
+
+## Batch handling
+
+The best-first heap + per-pop host sync is inherently per-request (contract §5).
+`_build_conditional_trees` loops `b in range(bs)`, builds a tree per request, and
+assembles `draft_token[bs,N]` + per-request `intra_mask[bs,N,N]` (via
+`build_intra_tree_mask_from_parents`). The shared verify tail (reconstruct →
+eagle_sample → compaction) already handles the batch. Target regime is bs=1;
+larger bs works but pays bs× the per-request Python heap + one GPU→CPU sync per
+heap pop (expected for P3; the batched/GPU-native builder is P4).
+
+## Flat-tree ↔ reconstruct convention
+
+Node `nodes[i]` → flat index `1+i`; `flat_parent[1+i] = 0` if `nodes[i].parent==-1`
+else `1+nodes[i].parent`; `flat_depth = nodes[i].depth + 1`. `reconstruct_indices_from_tree_mask`
+derives positions (`L + flat_depth`) and retrieve links from the ancestor mask —
+identical to P2, matching `dominotree.position_ids` (`[start]+[start+1+depth]`).
+
+## Top-3 risks to validate on GPU (MIRLab, 4B/TP=1, --disable-cuda-graph)
+
+1. **ph / base_logits / root_state numerical fidelity vs the reference.** The
+   shift_label slice, the dense-head `matmul` vs HF `lm_head(...)`, and the GRU
+   `embed_proj` transcription must match `domino_adapter.py` so the drafted
+   candidate set (and thus acceptance) matches the paper. Sanity: coherent output
+   + accept_length ≥ the toy tree's (an adaptive best-first tree should accept
+   ≥ a fixed caterpillar). Losslessness itself is guaranteed by the verify.
+2. **Dead-leaf padding under real vocab.** Confirm `mask_token_id` is never the
+   target's greedy argmax (would let a dead node be "accepted"). It is a special
+   token, so this should hold; watch for any prompt where the target legitimately
+   emits it.
+3. **Per-pop GPU→CPU sync throughput / correctness.** `children_fn` returns
+   logprobs via `.tolist()` (host sync per pop). Verify it runs (eager,
+   `--disable-cuda-graph`) and that the heap order matches the drafter log-prob
+   priority; also confirm `node_topk ≤ corr_topm` clamping didn't silently shrink
+   the tree below intent.
+
+## Validation launch (DOMINOTREE, conditional builder = default)
+
+```bash
+SGLANG_PLUGINS=dominotree \
+DOMINOTREE_NODE_TOPK=8 DOMINOTREE_CORR_TOPM=64 \
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3-4B \
+  --speculative-algorithm DOMINOTREE \
+  --speculative-draft-model-path Huang2020/Qwen3-4B-Domino-b16 \
+  --speculative-num-draft-tokens 16 \
+  --tp-size 1 --trust-remote-code --disable-cuda-graph --port 30000
+```
+
+Validation (P3 is lossless by construction — do NOT byte-compare vs DOMINO):
+coherent+correct output, and `spec_accept_length` ≥ the toy tree's
+(`DOMINOTREE_BUILDER=toy DOMINOTREE_NUM_BRANCH=2`, which was ~3.4). `corr_topm=0`
+exercises the full-vocab correction path.

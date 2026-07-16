@@ -158,6 +158,31 @@ def build_intra_tree_mask(
     return single.to(device=device).unsqueeze(0).expand(bs, n, n).contiguous()
 
 
+def build_intra_tree_mask_from_parents(
+    parents: "list[list[int]]", *, n: int, device: torch.device
+) -> torch.Tensor:
+    """Build the intra-tree ancestor mask ``[bs, N, N]`` from per-request parent
+    arrays (P3 adaptive best-first trees can differ per request).
+
+    ``parents[b]`` is a length-``n`` flat parent array where ``parents[b][0] == -1``
+    (root) and ``parents[b][i] < i`` (topological order). ``mask[b, i, j] == True``
+    iff ``j`` is an ancestor of ``i`` or ``i == j`` — the same convention
+    ``reconstruct_indices_from_tree_mask`` consumes (validated against
+    ngram_utils test) and the same walk as ``build_intra_tree_mask``, but with a
+    distinct tree per batch row.
+    """
+    bs = len(parents)
+    mask = torch.zeros((bs, n, n), dtype=torch.bool)
+    for b in range(bs):
+        par = parents[b]
+        for i in range(n):
+            j = i
+            while j != -1:
+                mask[b, i, j] = True
+                j = par[j]
+    return mask.to(device=device).contiguous()
+
+
 def build_full_attention_mask(
     intra_mask: torch.Tensor,  # [bs, N, N] bool
     *,
