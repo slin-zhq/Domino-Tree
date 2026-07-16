@@ -99,7 +99,8 @@ def register_plugin() -> None:
     1. Rebind the ``DFlashDraftModel`` architecture in the model registry to our
        ``DominoDraftModel`` (the Domino checkpoint's architecture string is
        ``"DFlashDraftModel"``, and upstream's class has no GRU head).
-    2. Register the ``DOMINO`` speculative algorithm -> ``DominoWorkerV2``.
+    2. Register the ``DOMINO`` (chain) and ``DOMINOTREE`` (toy tree verify)
+       speculative algorithms.
     """
     global _registered
     if _registered:
@@ -109,7 +110,7 @@ def register_plugin() -> None:
     from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
     from .draft_model import DominoDraftModel
-    from .worker import DominoWorkerV2
+    from .worker import DominoTreeWorkerV2, DominoWorkerV2
 
     # (1) Substitute our subclass for the DFlash draft architecture so the model
     # loader instantiates the head-carrying model for Domino checkpoints.
@@ -117,9 +118,9 @@ def register_plugin() -> None:
     # Also expose under our own name in case a checkpoint declares it.
     ModelRegistry.models.setdefault("DominoDraftModel", DominoDraftModel)
 
-    # (2) Register the DOMINO algorithm. supports_overlap=False for Phase 1
-    # (synchronous); handle_server_args forces overlap off so create_worker does
-    # not reject the run.
+    # (2) Register the DOMINO (chain) algorithm. supports_overlap=False for
+    # Phase 1 (synchronous); handle_server_args forces overlap off so
+    # create_worker does not reject the run.
     spec_class = _build_spec_class()
 
     @SpeculativeAlgorithm.register(
@@ -128,5 +129,21 @@ def register_plugin() -> None:
     def _domino_worker_factory(server_args):
         return DominoWorkerV2
 
+    # (3) Register DOMINOTREE (Phase 2 toy tree verify). Same DFLASH-draft
+    # gating as DOMINO (is_dflash()=True keeps the DFLASH draft plumbing); the
+    # tree verify is driven entirely inside DominoTreeWorkerV2, not gated by the
+    # scheduler. A distinct spec_class instance is required (register stores one
+    # instance per name).
+    tree_spec_class = _build_spec_class()
+
+    @SpeculativeAlgorithm.register(
+        "DOMINOTREE", supports_overlap=False, spec_class=tree_spec_class
+    )
+    def _dominotree_worker_factory(server_args):
+        return DominoTreeWorkerV2
+
     _registered = True
-    logger.info("Registered DOMINO speculative algorithm (Phase 1, chain draft).")
+    logger.info(
+        "Registered DOMINO (chain) and DOMINOTREE (toy tree verify) "
+        "speculative algorithms."
+    )

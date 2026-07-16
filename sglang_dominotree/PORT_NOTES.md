@@ -10,8 +10,9 @@ This plugin makes the **Domino** block-parallel drafter (GRU correction head,
   fork branch `sglang-feat/dflash-domino` (commit `e0d7870`, base ≈ upstream
   early-May 2026, pre-DFLASH-v2). See
   `docs/sglang_integration/domino_fork_head_wiring.md`.
-- **Scope:** `DOMINO` only. `DOMINOTREE` (the conditional draft tree) is Phase 3
-  and is deliberately not registered.
+- **Scope:** Phase 1 = `DOMINO` (chain). Phase 2 = `DOMINOTREE` (toy tree
+  verify) — see the "Phase 2" section at the end. The real conditional
+  best-first tree builder is Phase 3.
 
 ## Package contents
 
@@ -188,6 +189,216 @@ Notes:
   is the DFLASH block size and must equal the checkpoint's `block_size` (16).
 - Overlap is auto-disabled by the plugin (see (c)); no flag needed.
 - Smoke check that the plugin loaded: the log should show
-  "Registered DOMINO speculative algorithm" and
+  "Registered DOMINO ... and DOMINOTREE ..." and
   "DominoWorkerV2 initialized Domino chain rollout".
 ```
+
+---
+
+# Phase 2 — `DOMINOTREE` (toy tree verify)
+
+Goal: prove a **branching** draft tree from the Domino drafter verifies
+end-to-end through SGLang's EAGLE tree-verify machinery, **losslessly at T=0**,
+with `spec_accept_length >= the DOMINO chain's`. Plumbing proof only — the real
+conditional best-first builder is Phase 3.
+
+## New files / additions
+
+| File | Role |
+|---|---|
+| `src/dominotree_sglang/tree/toy_tree.py` | Pure-torch fixed "caterpillar" tree: topology (`build_topology`), tokens (`build_draft_tokens`), intra-tree ancestor mask (`build_intra_tree_mask`), full attention allow-mask (`build_full_attention_mask`). |
+| `src/dominotree_sglang/tree/__init__.py` | Re-exports. |
+| `src/dominotree_sglang/worker.py` | Adds `DominoTreeWorkerV2(DominoWorkerV2)` + `_compact_accept_to_front` helper. |
+| `src/dominotree_sglang/__init__.py` | Registers `DOMINOTREE` alongside `DOMINO`. |
+
+## Tree-construction approach chosen (and why)
+
+**Hand-emit the intra-tree ancestor mask, then let the `reconstruct_indices_from_tree_mask`
+sgl-kernel op derive positions + the three retrieve tensors — the NGRAM pattern
+(ngram_worker.py:288-344), NOT EAGLE's `build_tree_kernel_efficient`.** Rationale:
+`build_tree_kernel_efficient` is EAGLE-rigid (fixed `topk`/`spec_steps` fanout,
+level-wise scored inputs); the seam doc (§2, §13-14) flags it as the wrong tool
+for an irregular tree. NGRAM proves the verifier accepts a hand-built irregular
+tree via `reconstruct_indices_from_tree_mask` + `tree_topk = -1`. We reuse
+`EagleVerifyInput` directly with `spec_steps = N-1` (so `max_tree_depth = N`) and
+`topk = -1` — no verify-input subclass needed.
+
+**Tree shape (fixed caterpillar), N = block_size:** node 0 = root (prev
+verified/bonus token); nodes 1..S = spine = the Domino GRU-corrected chain
+(`S = N-1-num_branch`); nodes S+1..S+B = branch siblings at the shallowest
+depths (2nd LM-head candidate over the draft hidden). `num_branch` is env
+`DOMINOTREE_NUM_BRANCH` (default 2, clamped to ≤ (N-1)//2). For N=16, B=2 →
+spine of 13, branches at depths 1-2 (validated topology).
+
+**Why N = block_size (not block_size + branches):** the verify node budget
+equals the DFLASH `block_size`, so **all** DFLASH KV reservation, cuda-graph
+widths, and buffer sizing are reused with zero server-arg changes. Cost: the
+spine is `N-1-B` (=13) rather than the full `N-1` (=15) chain, so the strict
+"tree contains the whole chain" guarantee weakens to "tree contains the chain's
+first 13 tokens." Since 13 ≫ the measured chain acceptance (~2.7) and branches
+only add acceptance, `accept_length(tree) >= accept_length(chain)` holds on
+average (the P2 success metric) and per-step whenever chain acceptance ≤ 13.
+Set `DOMINOTREE_NUM_BRANCH=0` for a guaranteed chain-as-tree (accept ==, still
+exercises the full EAGLE tree-verify path).
+
+## THE KEY DESIGN QUESTION — `is_dflash()` vs `is_eagle()` gating
+
+**Decision: `DOMINOTREE` keeps `is_dflash() = True` (same spec_class as DOMINO);
+it does NOT report `is_eagle()`.** Reasoning, from the actual gating call sites:
+
+- The DOMINO drafter is a DFLASH block-parallel draft. All the DFLASH-gated
+  scaffolding is draft/request/KV-sizing, not verify shape:
+  scheduler `is_dflash()` gates at scheduler.py:897, 1484, 2120 (`validate_dflash_request`),
+  2690; server-arg setup via `handle_server_args -> _handle_dflash`. DOMINOTREE
+  needs every one of these (it keeps the DFLASH draft), so `is_dflash()=True`.
+- **The verify shape is NOT gated by the algorithm anywhere in the
+  scheduler/model-runner.** It is decided by the `SpecInput` the worker emits
+  and the attention backend's dispatch on `is_verify_input()`. Our worker emits
+  an `EagleVerifyInput` (type `EAGLE_VERIFY`) with a custom tree mask and calls
+  `eagle_prepare_for_verify` / `eagle_sample` **directly inside
+  `forward_batch_generation`**. So `is_dflash()=True` does **not** force a linear
+  verify — there is no scheduler branch that would. Reporting `is_eagle()=True`
+  instead would (wrongly) swap the draft worker/plumbing to EAGLE's and break the
+  DFLASH draft. So the correct combination is **DFLASH draft gating + EAGLE
+  verify invoked in-worker.**
+- **One real interaction:** `create_dummy_verify_input` (spec_info.py:295-355)
+  dispatches on `is_dflash()` and would build a *DFlash linear* dummy verify
+  input for target-verify **CUDA-graph capture**, which mismatches our real
+  `EagleVerifyInput` tree. Mitigation for P2: we run the target verify **eagerly**
+  — `eagle_prepare_for_verify`'s `can_run_graph` returns False for the
+  type/shape mismatch, so no graph is replayed. This is a GPU-validation risk
+  (see risks) and a P2 correctness-over-speed choice.
+
+## How the accepted path is compacted for KV commit
+
+A branching tree accepts a **non-contiguous** set of nodes; DFLASH's
+`_append_target_hidden_to_draft_kv_by_loc` commits a **dense prefix**
+(dflash_worker_v2.py:823-953). Sequence:
+
+1. `predict, accept_lens, accept_index = eagle_sample(...)` — `accept_lens`
+   includes the bonus (eagle_utils.py:560-563).
+2. `move_accept_tokens_to_target_kvcache(batch, accept_index, accept_lens-1, allocator)`
+   (spec_utils.py:506-558) — moves the accepted nodes' **target** KV to the
+   contiguous front slots `req_to_token[req, L : L+accept_len]`.
+3. `_compact_accept_to_front(predict/hidden, accept_index, bs, N)` — gathers the
+   accepted `predict` tokens and target hidden to the front of each per-req block
+   (reimpl of eagle_worker_v2.py:1595-1611). After this the tree looks exactly
+   like DFLASH's contiguous chain.
+4. Reuse DFLASH's writer verbatim: `_append_target_hidden_to_draft_kv_by_loc(
+   target_hidden=front_hidden, cache_loc_2d=front_slots, commit_lens=accept_lens, ...)`
+   writes the accepted prefix's projected hidden into the **draft** KV. Front
+   slots are gathered from `req_to_token[req, L:L+N]` (post-move).
+5. `next_token_ids = compacted predict`; `accept_lens` (=commit_lens) carries the
+   length; bonus / next `verified_id` = `predict[req, accept_len-1]`;
+   `new_seq_lens = prefix_lens + accept_lens`.
+
+## Upstream methods reused (file:line)
+
+- `eagle_prepare_for_verify` (eagle_utils.py:281-354), `eagle_sample`
+  (eagle_utils.py:357-563) — verify prep + greedy tree acceptance.
+- `reconstruct_indices_from_tree_mask` (`sgl_kernel.speculative`; NGRAM usage
+  ngram_worker.py:288-297) — positions + retrieve tensors from the intra mask.
+- `move_accept_tokens_to_target_kvcache` (spec_utils.py:506-558),
+  `assign_req_to_token_pool_func` (spec_utils) — KV compaction / draft-block map.
+- `EagleVerifyInput` (eagle_info.py:30-96) with `topk=-1`, `spec_steps=N-1`.
+- DFLASH draft build templated from dflash_worker_v2.py:1326-1500 (using freed
+  backup/alloc/restore scratch, the fork-v1 pattern, since the tree verify
+  allocates its own cache); `_append_target_hidden_to_draft_kv_by_loc`,
+  `_make_next_draft_input_decode`, `_draft_block_spec_info` reused as-is.
+
+## Phase-2 constraints
+
+T=0 greedy only; TP=1 only (dense LM-head for branch candidates + Domino
+rollout); page_size==1; non-mamba target; no compact-draft-cache window. Any
+other case falls back to the lossless Domino chain (`DominoWorkerV2`).
+
+## Not verifiable without a GPU (top risks to validate on MIRLab, 4B/TP=1)
+
+1. **Intra-tree mask orientation / `reconstruct_indices_from_tree_mask`
+   contract.** We build `mask[i,j]=True iff j is ancestor-or-self of i` (row =
+   query node, col = key/ancestor) matching the NGRAM convention, but the exact
+   row/col orientation and dtype the kernel expects are not verifiable offline.
+   A wrong orientation yields wrong retrieve tensors → wrong acceptance. **First
+   thing to check** (compare `retrieve_next_token`/`retrieve_index` against a
+   hand-computed tree for bs=1).
+2. **KV compaction + draft-KV commit correctness.** The
+   `move_accept_tokens_to_target_kvcache` + front-slot gather +
+   `_append_target_hidden_to_draft_kv_by_loc` chain must land the accepted
+   path's target KV and projected draft KV at exactly `req_to_token[req, L:L+len]`.
+   A mistake corrupts the cache → non-lossless output or drift. Validate
+   byte-identity vs plain AR and vs DOMINO chain at T=0.
+3. **Eager tree verify under `is_dflash()` gating.** That the target attention
+   backend (flashinfer/fa3) correctly consumes our FULL custom tree mask for an
+   `EAGLE_VERIFY` input built outside the EAGLE worker. **`--disable-cuda-graph`
+   is REQUIRED for P2** (verify runs eager): `eagle_prepare_for_verify` routes a
+   tree verify through the decode CUDA-graph runner otherwise, which errors
+   `custom_mask_buf must be initialized ... in cuda graph mode`. Cuda-graph
+   custom-mask support is a later phase.
+
+## GPU bring-up fixes (validated iterations)
+
+- **`custom_mask_buf must be initialized ... in cuda graph mode`** — the tree
+  verify cannot run under the decode CUDA-graph runner in P2. Launch with
+  `--disable-cuda-graph` (verify is eager). Documented as a hard P2 requirement.
+- **`q.shape[0] (16) != qo_indptr[-1] (6)` at the target verify.** Root cause:
+  the target verify forward was called with `skip_attn_backend_init=True`
+  (copied from DFLASH). DFLASH's `DFlashVerifyInput.prepare_for_verify` plans the
+  target attention backend itself, so DFLASH may skip. But
+  `eagle_prepare_for_verify` only plans in the cuda-graph path; with
+  `--disable-cuda-graph` it **defers** planning to the target `forward_extend`.
+  `skip_attn_backend_init=True` maps to `ForwardBatch.mark_forward_metadata_ready()`
+  (forward_batch_info.py:578-603), which makes `forward_extend` SKIP that
+  deferred planning — so the verify reused the previous forward's (prefill's)
+  attention metadata (`qo_indptr[-1]=6` = the ~6-token warmup/prefill), while our
+  tree passes N=16 nodes. **Fix:** omit `skip_attn_backend_init` on the target
+  verify call (EAGLE's behavior, eagle_worker_v2.py:1480-1484) so
+  `forward_extend` re-plans for the 16 tree nodes + custom mask.
+  **Warmup needed no special handling:** the target warmup uses the
+  `is_dflash()` DFlash-linear dummy from `create_dummy_verify_input`
+  (base_runner.py:603), which is self-consistent; only the real tree verify
+  needed the re-plan.
+- **NOT LOSSLESS (over-accept ~3.33 vs chain 2.7, output diverges) — even at
+  NUM_BRANCH=0 (pure chain).** Root cause: the draft block corrupted the
+  scheduler's reserved verify-slot mapping. `assign_extend_cache_locs_func`
+  (cache_locs.py `assign_extend_cache_locs` kernel) *reads* the reserved slots
+  from `req_to_token[req, L:L+N]` — the scheduler pre-reserves them for the
+  decode; it does NOT allocate. My `_domino_draft_block` instead did
+  `allocator.alloc(bs*N)` + `assign_req_to_token_pool_func(...)`, which
+  **overwrote** `req_to_token[req, L:L+N]` with fresh scratch slots, then
+  `allocator.restore_state()` freed the scratch but left `req_to_token` pointing
+  at the freed ids. `eagle_prepare_for_verify` then re-reads
+  `req_to_token[req, L:L+N]` for the verify `out_cache_loc`, so the target verify
+  wrote committed KV into **freed** slots; once those slots were reused by a
+  later step, the committed prefix KV was corrupted → the target verify at the
+  next block saw wrong context → accepted non-greedy tokens (over-accept) and
+  the output diverged. The KV stores are mask-independent, which is why the
+  first block(s) looked fine and divergence appeared a few tokens in.
+  **Fix:** the draft block now `assign_extend_cache_locs_func`-reads the reserved
+  slots and dual-uses them for the draft-KV forward (draft pool) while the tree
+  verify uses the same slots for target KV (target pool) — exactly DFLASH-v2's
+  non-compact draft path (dflash_worker_v2.py:1393-1402). No alloc/restore, no
+  `req_to_token` overwrite; `eagle_prepare_for_verify` re-reads the intact
+  reserved slots. This makes NUM_BRANCH=0 a true chain-as-tree (accept == chain,
+  byte-identical) and keeps the target KV correct for branching trees too.
+
+## Validation launch command (DOMINOTREE)
+
+```bash
+SGLANG_PLUGINS=dominotree \
+DOMINOTREE_NUM_BRANCH=2 \
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3-4B \
+  --speculative-algorithm DOMINOTREE \
+  --speculative-draft-model-path Huang2020/Qwen3-4B-Domino-b16 \
+  --speculative-num-draft-tokens 16 \
+  --tp-size 1 \
+  --trust-remote-code \
+  --disable-cuda-graph \
+  --port 30000
+```
+
+`--disable-cuda-graph` is **required** in P2 (eager tree verify). Compare at
+temperature 0 against: (a) plain AR (no spec), (b)
+`--speculative-algorithm DOMINO` — output must be byte-identical to both, and
+`spec_accept_length` must be ≥ the DOMINO run's. Set `DOMINOTREE_NUM_BRANCH=0`
+for the guaranteed chain-as-tree sanity baseline first.
