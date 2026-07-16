@@ -58,6 +58,46 @@ tokens per round, per-round stage timings, and a short output signature for loss
 checks. Methods run through a warmup prompt before timing (matching the DDTree/CaDDTree
 benchmark convention), so measured prompts are warm from the start.
 
+## Serving on SGLang (experimental)
+
+DominoTree can also run inside the **SGLang** production serving engine — not just the
+single-stream research harness above — as an out-of-tree speculative-decoding plugin (the
+package under `sglang_dominotree/`). It registers a `DOMINOTREE` speculative algorithm on
+**stock upstream SGLang** and reuses SGLang's EAGLE tree-verify; it vendors Domino's
+official GRU-correction head (copied verbatim, not reimplemented) and adds our conditional
+best-first tree builder with a GPU-native CUDA-graph builder.
+
+> **Status:** on the `sglang-integration` branch; validated on an RTX 5080 (Qwen3-4B pair,
+> TP=1) at temperature 0 — lossless, ~1.9× faster tree construction via the GPU-native
+> builder, and it runs under SGLang's decode CUDA graphs. See
+> `docs/domino_tree_sglang_integration/` (start with `EXPLAINER_noob_friendly.md`).
+
+**Install** (needs a recent upstream SGLang with the `sglang.srt.plugins` entry point +
+DFLASH-v2; validated against commit `1adb53f14`):
+
+```bash
+pip install -e sglang_dominotree      # registers the `dominotree` sglang.srt.plugins entry point
+```
+
+**Serve** DominoTree on the Domino drafter:
+
+```bash
+SGLANG_PLUGINS=dominotree \
+python -m sglang.launch_server \
+  --model-path /path/to/Qwen3-4B \
+  --speculative-algorithm DOMINOTREE \
+  --speculative-draft-model-path /path/to/Qwen3-4B-Domino-b16 \
+  --speculative-num-steps 1 --speculative-eagle-topk 1 --speculative-num-draft-tokens 16 \
+  --tp-size 1 --trust-remote-code --mem-fraction-static 0.7 --port 30000
+```
+
+`SGLANG_PLUGINS=dominotree` whitelists the plugin; the server then serves DominoTree
+speculative decoding on SGLang's OpenAI-compatible / `/generate` endpoints. Env knobs:
+`DOMINOTREE_NODE_TOPK` (8), `DOMINOTREE_CORR_TOPM` (64), `DOMINOTREE_GPU_BUILDER`
+(1 = GPU-native CUDA-graph builder, 0 = pure-Python). For the plain **Domino chain** on
+SGLang, use `--speculative-algorithm DOMINO`. Validated path: T=0 greedy (T>0 falls back to
+the Domino chain), TP=1, page-size 1, non-Mamba target.
+
 ## Baselines
 
 The paper's AR / DFlash / DDTree / CaDDTree baseline numbers come from the official
