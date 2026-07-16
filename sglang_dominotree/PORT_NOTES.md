@@ -614,3 +614,143 @@ op-for-op; the only edit is the `embed_tokens` handle.
    sync collapsing to one small D→H copy per corr pop. Confirm per-step latency /
    TPS drops vs P3 (the accept-length win becoming a real throughput win); the
    `corr_topm=0` full-vocab path is heavier — check both `corr_topm=64` and `0`.
+
+---
+
+# Phase 4 (part 2) — tree verify under the decode CUDA graph (drop `--disable-cuda-graph`)
+
+DOMINOTREE previously **required** `--disable-cuda-graph` (found in P2): the decode
+CUDA-graph runner captured the target-verify graph without a `custom_mask_buf`, so
+replaying our tree verify crashed with
+`custom_mask_buf must be initialized ... in cuda graph mode`. Running eager is a
+real handicap vs the DOMINO chain (which uses the decode graph). P4b makes the
+tree verify replay a graph like EAGLE/NGRAM.
+
+## Root cause + how EAGLE/NGRAM provide `custom_mask_buf`
+
+The decode graph runner captures the verify graph via `get_spec_info`
+(decode_cuda_graph_runner.py:1025-1104). It dispatches on the algorithm:
+- **EAGLE / NGRAM** build the dummy verify input with `custom_mask=self.buffers.custom_mask`
+  (1044 / 1095) → flashinfer's `init_forward_metadata_capture_cuda_graph`
+  (flashinfer_backend.py:803-808) sees `spec_info.custom_mask is not None` →
+  `use_custom_mask=True` → the prefill wrapper is created with a static
+  `custom_mask_buf` (= `self.cuda_graph_custom_mask`, flashinfer_backend.py:737,
+  760-773). At replay, the real tree mask (from `generate_attn_arg_prefill`) is
+  copied into that buffer by flashinfer's `begin_forward` and the graph replays.
+- **DFLASH** (what DOMINOTREE reports via `is_dflash()=True`) instead calls
+  `resolve_dflash_verify_mask_policy(attn_backend)` (1071); for backends in
+  `_DFLASH_VERIFY_SKIP_CUSTOM_MASK_BACKENDS` (flashinfer/fa3/triton/trtllm) it
+  returns `build_custom_mask=False` — correct for DFLASH's LINEAR verify
+  (causal == no custom mask), so the capture uses `custom_mask=None` and the
+  wrapper has **no** `custom_mask_buf`. Our tree verify emits an
+  `EagleVerifyInput` WITH a tree mask → replay wants a `custom_mask_buf` that was
+  never allocated → the P2 crash. `can_run_graph` itself has no mask-specific
+  gate (decode_cuda_graph_runner.py:400-469), so nothing else blocks it.
+
+## What changed (plugin-only)
+
+`__init__.py`: `register_plugin()` calls `_install_dflash_custom_mask_graph_hook()`,
+which installs an **algorithm-aware wrapper** on
+`sglang.srt.speculative.dflash_utils.resolve_dflash_verify_mask_policy`. On the
+first call while the server's `speculative_algorithm == "DOMINOTREE"` (i.e. during
+target-verify graph capture, after the global server args are set at
+`model_runner.py:525`), the wrapper empties the module global
+`_DFLASH_VERIFY_SKIP_CUSTOM_MASK_BACKENDS`. Since that frozenset is read at CALL
+time, `build_custom_mask` becomes True for all callers, so the DFLASH verify graph
+is captured WITH `custom_mask=buffers.custom_mask` (the static buffer, sized
+`(max_bs*seq_len_fill + max_num_token) * num_tokens_per_bs` in base_runner.py:93 —
+large enough for our tree FULL_MASK). At replay our tree mask is copied into that
+buffer (flashinfer), so the graph replays the correct tree attention.
+
+**Why a wrapper installed in `register_plugin` (not `handle_server_args`):** the
+graph capture runs in the scheduler **subprocess**, but `handle_server_args` runs
+only in the **main process** — `run_scheduler_process` receives a pre-constructed
+`server_args`, so `ServerArgs.__post_init__` / `handle_speculative_decoding` never
+re-run in the subprocess, and on spawn the subprocess re-imports `dflash_utils`
+fresh, losing a main-process patch. `register_plugin` DOES run in the subprocess
+via `load_plugins()` (scheduler.py:4181), before `Scheduler(...)`/graph capture,
+so the hook must live there. `get_spec_info` reads
+`resolve_dflash_verify_mask_policy` via a **local import** each call, so it picks
+up our wrapper; other callers (chain-fallback runtime) read the now-emptied
+frozenset and stay consistent.
+
+The worker's `_tree_decode_forward` was **already** graph-ready: it mirrors EAGLE
+(`eagle_prepare_for_verify` returns `can_run_cuda_graph`; when True it
+`load_batch`es + `mark_forward_metadata_ready()`, and the target
+`forward_batch_generation(is_verify=True)` then replays the graph). No worker
+change was needed beyond removing the `--disable-cuda-graph` requirement.
+
+## Scoping + safety
+
+- **Algorithm-scoped at call time** (the wrapper checks `get_global_server_args().speculative_algorithm`),
+  so a DOMINO-chain server is unaffected — the wrapper never empties the set there.
+- **Subprocess-robust**: installed in `register_plugin`, which `load_plugins()`
+  runs in the scheduler subprocess before graph capture (works under spawn OR
+  fork).
+- Ordering: the TARGET model runner captures before the DRAFT; the global algo is
+  `DOMINOTREE` at target capture, so the skip set is emptied exactly when the
+  target-verify custom-mask graph is captured. Idempotent (wrapper is marked;
+  only empties once).
+- Contained to a DOMINOTREE server. Its only side effect is the Domino-chain
+  fallback (T>0) building a causal custom mask instead of the built-in causal
+  path — correct, marginally slower, rarely hit.
+- **No-op with `--disable-cuda-graph`** (no decode graph is captured), so that
+  remains a working eager fallback.
+- The draft-block forward under graph is unchanged from DFLASH (draft worker
+  `get_spec_info` keeps `custom_mask=None` because `is_draft_worker=True`,
+  decode_cuda_graph_runner.py:1080 — so the draft graph stays a plain block
+  forward, exactly as DFLASH runs it).
+
+## Coexistence with the expander / rollout graphs
+
+- **Model decode graphs** (draft + target) are captured at **init** (before
+  serving). **The P4a GPU node-expander** captures its 3 graphs **lazily on the
+  first decode**, on a side stream with sync bracketing, while we're in eager
+  Python between the draft forward and the target verify — so it never captures
+  concurrently with the model graphs. The Domino **rollout** graph is never
+  captured in the conditional path (only the toy/chain path calls
+  `rollout_draft_block`). At replay all coexist as separate `CUDAGraph` objects.
+  This is the #1 thing to GPU-validate (see risks).
+
+## If it can't be graphed — the minimal blocker (documented, not forced)
+
+If empting the skip set does not yield a working graph on GPU (e.g. flashinfer
+refuses the capture/replay for an externally-built `EagleVerifyInput`, or the
+expander capture can't coexist with the model graph pool), the minimal blocker is
+architectural: **`get_spec_info` hardcodes the verify spec-info + mask policy per
+`is_*()` branch, and DOMINOTREE must stay `is_dflash()=True` for the draft
+plumbing while needing NGRAM/EAGLE-style custom-mask capture.** The only in-plugin
+lever is the skip-set global; a cleaner fix would be an upstream hook letting a
+`CustomSpecAlgo` choose the capture mask policy (out of scope: no upstream edits).
+In that case keep `--disable-cuda-graph` (still fully lossless, just eager).
+
+## Top-3 GPU risks to validate
+
+1. **Graph coexistence.** Model decode graph (target verify custom-mask) + the 3
+   expander graphs (captured mid-first-decode on a side stream) + draft-block
+   graph must all capture and replay without allocator/stream collisions. This is
+   why `--disable-cuda-graph` was used so far — validate capture succeeds and no
+   "operation not permitted during stream capture" / pool errors.
+2. **Lossless + same accept.** Output must stay coherent/correct and
+   `accept_length` must match the eager run (4.68) — the graph must apply the tree
+   mask, not causal-attend the flattened tree (that was the P2 over-accept bug).
+   Cross-check the graphed run's accept vs `--disable-cuda-graph`.
+3. **TPS actually rises.** The point of dropping `--disable-cuda-graph` is a
+   per-step latency win from the target-verify (and draft) graphs. Confirm TPS
+   improves vs the eager P4a run; if the expander capture forces eager or coexist
+   fails, fall back to `--disable-cuda-graph`.
+
+## Validation launch (no --disable-cuda-graph)
+
+```bash
+SGLANG_PLUGINS=dominotree \
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3-4B \
+  --speculative-algorithm DOMINOTREE \
+  --speculative-draft-model-path Huang2020/Qwen3-4B-Domino-b16 \
+  --speculative-num-draft-tokens 16 \
+  --tp-size 1 --trust-remote-code --port 30000
+```
+
+Compare accept_length + TPS against the same command **with** `--disable-cuda-graph`
+(eager P4a): accept must be identical (4.68), TPS should be higher without it.

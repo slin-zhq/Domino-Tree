@@ -193,8 +193,13 @@ class DominoTreeWorkerV2(DominoWorkerV2):
     Losslessness is BY CONSTRUCTION for both (greedy tree verify only accepts
     argmax-matching tokens). Constraints: T=0 greedy only, TP=1 only (the builder
     reads the dense LM head + runs a per-node GRU on the host), page_size==1,
-    non-mamba target, no compact-draft-cache window, ``--disable-cuda-graph``.
-    Anything else falls back to the lossless Domino chain. See PORT_NOTES.md.
+    non-mamba target, no compact-draft-cache window. Anything else falls back to
+    the lossless Domino chain.
+
+    P4: the tree verify now runs under the decode CUDA graph (the DOMINOTREE
+    spec_class enables the custom-mask DFLASH verify graph in handle_server_args),
+    so ``--disable-cuda-graph`` is OPTIONAL — kept as an eager fallback. See
+    PORT_NOTES.md.
     """
 
     def __init__(self, *args, **kwargs) -> None:
