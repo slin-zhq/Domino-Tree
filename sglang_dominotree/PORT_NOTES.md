@@ -671,8 +671,9 @@ fresh, losing a main-process patch. `register_plugin` DOES run in the subprocess
 via `load_plugins()` (scheduler.py:4181), before `Scheduler(...)`/graph capture,
 so the hook must live there. `get_spec_info` reads
 `resolve_dflash_verify_mask_policy` via a **local import** each call, so it picks
-up our wrapper; other callers (chain-fallback runtime) read the now-emptied
-frozenset and stay consistent.
+up our wrapper. (P5 correction: `get_spec_info` at graph capture is the ONLY
+runtime consumer of this policy — the chain-verify runtime never reads it; see
+the Phase 5 section for the consequence.)
 
 The worker's `_tree_decode_forward` was **already** graph-ready: it mirrors EAGLE
 (`eagle_prepare_for_verify` returns `can_run_cuda_graph`; when True it
@@ -691,9 +692,18 @@ change was needed beyond removing the `--disable-cuda-graph` requirement.
   `DOMINOTREE` at target capture, so the skip set is emptied exactly when the
   target-verify custom-mask graph is captured. Idempotent (wrapper is marked;
   only empties once).
-- Contained to a DOMINOTREE server. Its only side effect is the Domino-chain
+- ~~Contained to a DOMINOTREE server. Its only side effect is the Domino-chain
   fallback (T>0) building a causal custom mask instead of the built-in causal
-  path — correct, marginally slower, rarely hit.
+  path — correct, marginally slower, rarely hit.~~ **WRONG — corrected in P5.**
+  The chain-fallback runtime NEVER builds a custom mask: upstream hardcodes
+  `custom_mask = None` in the chain verify (`dflash_worker_v2.py:1504`), and
+  `resolve_dflash_verify_mask_policy` has exactly one runtime caller — the graph
+  capture (`decode_cuda_graph_runner.py:1063-1073`). So on a DOMINOTREE
+  cuda-graph server a chain-fallback verify would REPLAY the captured
+  custom-mask kernel against a stale/garbage `custom_mask_buf` (never refreshed
+  because `generate_attn_arg_prefill` returns `mask=None`) → wrong commits.
+  Fixed in P5 by forcing the chain-fallback verify EAGER
+  (`DominoTreeWorkerV2._chain_fallback`).
 - **No-op with `--disable-cuda-graph`** (no decode graph is captured), so that
   remains a working eager fallback.
 - The draft-block forward under graph is unchanged from DFLASH (draft worker
@@ -754,3 +764,83 @@ python -m sglang.launch_server \
 
 Compare accept_length + TPS against the same command **with** `--disable-cuda-graph`
 (eager P4a): accept must be identical (4.68), TPS should be higher without it.
+
+---
+
+# Phase 5 — correctness gate (fail-fast guards + chain-fallback stale-mask fix)
+
+Static-only changes (no GPU here); prerequisite for the T>0-tree (P6) and
+concurrency work. Two parts:
+
+## 5.1 The chain-fallback stale-mask bug (Codex #1) — root cause + fix
+
+**Root cause (verified against upstream).** The P4b hook makes the DOMINOTREE
+target-verify graph capture allocate a flashinfer `custom_mask_buf`
+(`get_spec_info` → `resolve_dflash_verify_mask_policy` with the emptied skip
+set → `custom_mask=buffers.custom_mask` → wrapper built with
+`custom_mask_buf`, flashinfer_backend.py:760-789). The captured kernel is
+therefore a CUSTOM-mask kernel reading that static buffer. The TREE verify
+refreshes the buffer at every replay (its `EagleVerifyInput.custom_mask` is
+copied in by `begin_forward`). But the inherited CHAIN verify passes
+`custom_mask=None` (`dflash_worker_v2.py:1504`; the runtime never consults the
+mask policy), `can_run_graph` has no mask gate
+(decode_cuda_graph_runner.py:400-469), and `generate_attn_arg_prefill` returns
+`mask=None` → `begin_forward(custom_mask=None)` performs **no buffer refresh**
+→ the replayed kernel reads a stale packed tree mask (or initial zeros) →
+garbage attention → non-greedy/wrong commits. Hit by ANY chain fallback on a
+cuda-graph DOMINOTREE server: T>0 requests (pre-P6), or a non-Domino draft
+model (`tree_topology is None`).
+
+**Fix: option (a) — force the chain-fallback verify EAGER.**
+`DominoTreeWorkerV2._chain_fallback` temporarily nulls
+`target_worker.model_runner.decode_cuda_graph_runner` around the inherited
+`forward_batch_generation` call (restored in `finally`) whenever the batch can
+reach the chain decode verify (non-extend, non-idle) and the graph runner
+exists. Both graph decision points — `DFlashVerifyInput.prepare_for_verify`
+(dflash_info.py:74-87) and `ModelRunner._forward_raw`
+(model_runner.py:2978-2982) — then take the eager branch: prepare_for_verify
+plans eager attention metadata and the verify forward runs with metadata
+marked ready. This is byte-for-byte the `--disable-cuda-graph` chain flow that
+was GPU-validated in P1. The draft-block graph, the Domino rollout graph, and
+the P4a expander graphs live on the DRAFT runner / their own `CUDAGraph`
+objects and are untouched; the T=0 tree path never enters `_chain_fallback`.
+
+Rejected alternatives: (b) building + uploading a causal custom mask keeps the
+graph replay but adds a new mask-layout code path that must exactly match the
+chain verify's kv planning (planning/reserved seq-lens swap,
+dflash_worker_v2.py:1527-1538) — high wrong-mask risk for a rarely-hit path;
+(c) scoping the P4b skip-set emptying to the tree verify only is impossible
+in-plugin: there is ONE captured target-verify graph per bs bucket, shared by
+tree and chain verifies — it either has a `custom_mask_buf` or it doesn't.
+
+**P6 interaction.** When T>0 routes to a sampling TREE verify, that path uses
+the same custom-mask replay as the validated T=0 tree (buffer refreshed every
+step) and never enters `_chain_fallback`; the helper remains only for
+genuinely-unsupported fallbacks, still correct and rarely hit. Nothing to undo.
+
+## 5.2 Fail-fast guards (were: silent wrong output / mid-decode crashes)
+
+| Guard | Where | Why |
+|---|---|---|
+| TP > 1 (DOMINO + DOMINOTREE) | `assert_domino_server_args_supported` via spec-class `handle_server_args` (main proc) + worker `__init__` (subprocess) | rollout TP global-argmax callbacks unported; builders read dense LM head. **`TODO(P8-8B/TP)` marker at the guard** — remove there to relax. |
+| page_size != 1 (DOMINOTREE) | same | tree KV path (reserved-slot dual-use, compaction, front-slot commit) assumes page_size==1. |
+| compact draft cache (DOMINOTREE) | same | `_domino_draft_block` assumes the non-windowed draft-KV layout. |
+| Mamba/hybrid target (DOMINOTREE) | `DominoTreeWorkerV2.__init__` (needs live attn backend: `hasattr(..., "update_mamba_state_after_mtp_verify")`) | tree verify does not port `commit_mamba_states_after_verify` (chain/DOMINO handles Mamba upstream — not guarded there). |
+| return_logprob (per request) | `_assert_request_supported` at top of `DominoTreeWorkerV2.forward_batch_generation` | `compute_spec_v2_logprobs` not ported. Backstop — upstream `validate_dflash_request` (scheduler.py:2120) already aborts these gracefully since we report `is_dflash()`. |
+| grammar (per request) | same | `eagle_sample` called without a grammar vocab mask. Same upstream backstop note. |
+
+## GPU validation checklist (MIRLab, 4B/TP=1)
+
+1. **No regression:** T=0 tree under cuda graph — accept ~4.68, ~276 TPS,
+   losslessness spot-check; and once under `--disable-cuda-graph` (eager still works).
+2. **The fix:** T>0 request(s) on the cuda-graph server → coherent, correct
+   output (pre-P5 this replayed a stale mask); log shows the greedy-only
+   warning; TPS for the T>0 stream ≈ the eager chain (~274), not garbage.
+   Mixed workload: alternate T=0 and T>0 requests — T=0 accept unchanged after
+   a T>0 step (buffer refresh not poisoned either direction).
+3. **Guards:** each of the 6 fires with its message: `--tp-size 2` (launch
+   abort), `--page-size 2`, `--speculative-draft-window-size 2048` (DOMINOTREE),
+   a Mamba/hybrid target if available (else skip), a `logprob=True` request and
+   a `json_schema` request (scheduler abort message, not a worker crash).
+4. **DOMINO server unaffected:** chain server still runs its verify under the
+   decode graph (no forced eager, no custom-mask buffer).

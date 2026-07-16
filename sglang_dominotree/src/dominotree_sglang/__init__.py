@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 _registered = False
 
 
-def _build_spec_class():
+def _build_spec_class(algo_name: str = "DOMINO"):
     """Build a ``CustomSpecAlgo`` subclass that makes ``DOMINO`` behave like the
     builtin ``DFLASH`` everywhere except worker creation.
 
@@ -76,7 +76,16 @@ def _build_spec_class():
             # disable, max_running_requests default, ...).
             from sglang.srt.arg_groups.speculative_hook import _handle_dflash
 
+            from .worker import assert_domino_server_args_supported
+
             _handle_dflash(server_args)
+
+            # P5 fail-fast guards (main process, before any model load):
+            # TP>1 for both algos; page_size!=1 and the compact draft cache
+            # additionally for DOMINOTREE. Re-checked in the worker __init__
+            # (scheduler subprocess). Mamba/hybrid targets are guarded in the
+            # worker __init__ only (needs the live attention backend).
+            assert_domino_server_args_supported(server_args, algo_name)
 
             # Phase 1 runs synchronously (supports_overlap=False). The Domino
             # rollout captures its own CUDA graph and we have not validated it
@@ -121,20 +130,24 @@ def _install_dflash_custom_mask_graph_hook() -> None:
 
     **Mechanism.** On the first call while the server's ``speculative_algorithm``
     is ``DOMINOTREE`` (i.e. during graph capture, after the global server args are
-    set), the wrapper empties ``_DFLASH_VERIFY_SKIP_CUSTOM_MASK_BACKENDS``. Because
-    that frozenset is a module global read at CALL time by
-    ``resolve_dflash_verify_mask_policy``, ALL callers become consistent — the
-    graph capture (``get_spec_info``'s local import -> our wrapper) AND the
-    chain-fallback runtime verify (which may hold the original function reference)
-    both then see ``build_custom_mask=True``. So the graph is captured with a
-    ``custom_mask_buf`` and the chain fallback builds a matching causal custom mask.
+    set), the wrapper empties ``_DFLASH_VERIFY_SKIP_CUSTOM_MASK_BACKENDS``, so the
+    target-verify graph is captured WITH ``custom_mask=buffers.custom_mask`` and
+    the flashinfer wrapper gets a static ``custom_mask_buf``. At replay, the tree
+    verify's ``EagleVerifyInput`` mask is copied into that buffer each step.
+
+    **P5 correction (chain-fallback interaction).** The only runtime consumer of
+    this policy is the graph CAPTURE (decode_cuda_graph_runner.py:1063-1073).
+    Upstream's chain verify does NOT consult it — it hardcodes
+    ``custom_mask=None`` (dflash_worker_v2.py:1504) — so a chain-verify graph
+    replay on a DOMINOTREE server would rerun the captured custom-mask kernel
+    against a STALE mask buffer (wrong commits). ``DominoTreeWorkerV2._chain_fallback``
+    therefore forces every chain-fallback verify EAGER; this hook alone is NOT
+    sufficient for correctness of the fallback.
 
     **Scope / safety.** No effect on a DOMINO (chain) server — the wrapper checks
     the algorithm and never empties the set there. No-op under
     ``--disable-cuda-graph`` (no graph is captured). Idempotent (marks the wrapper;
-    only empties once). The only side effect on a DOMINOTREE server is the T>0
-    chain fallback building a causal custom mask instead of the built-in causal
-    path — correct, marginally slower, rarely hit.
+    only empties once).
     """
     try:
         import sglang.srt.speculative.dflash_utils as _du
@@ -195,7 +208,7 @@ def register_plugin() -> None:
     # (2) Register the DOMINO (chain) algorithm. supports_overlap=False for
     # Phase 1 (synchronous); handle_server_args forces overlap off so
     # create_worker does not reject the run.
-    spec_class = _build_spec_class()
+    spec_class = _build_spec_class("DOMINO")
 
     @SpeculativeAlgorithm.register(
         "DOMINO", supports_overlap=False, spec_class=spec_class
@@ -208,7 +221,7 @@ def register_plugin() -> None:
     # tree verify is driven entirely inside DominoTreeWorkerV2, not gated by the
     # scheduler. A distinct spec_class instance is required (register stores one
     # instance per name).
-    tree_spec_class = _build_spec_class()
+    tree_spec_class = _build_spec_class("DOMINOTREE")
 
     @SpeculativeAlgorithm.register(
         "DOMINOTREE", supports_overlap=False, spec_class=tree_spec_class

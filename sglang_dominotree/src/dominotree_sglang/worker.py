@@ -53,11 +53,60 @@ def _tp_argmax_not_implemented(*_args, **_kwargs):
     )
 
 
+def assert_domino_server_args_supported(server_args, algo_name: str) -> None:
+    """Fail fast at LAUNCH on server configs the Domino plugin does not support.
+
+    Called from the spec class's ``handle_server_args`` (main process, before any
+    model load) and re-checked in the worker ``__init__`` (scheduler subprocess),
+    so programmatic launches that bypass the speculative arg hook still fail
+    fast instead of silently producing wrong output (P5 correctness gate).
+    """
+    # ------------------------------------------------------------------
+    # TODO(P8-8B/TP): relax this guard when the TP>1 rollout lands.
+    # The Domino rollout's TP global-argmax reduction callbacks are unported
+    # (see _tp_argmax_not_implemented above); the DOMINOTREE builders also read
+    # the dense (unsharded) LM head. Both need work before TP>1 is safe.
+    # ------------------------------------------------------------------
+    tp_size = int(getattr(server_args, "tp_size", 1) or 1)
+    if tp_size != 1:
+        raise NotImplementedError(
+            f"{algo_name} does not support tensor parallelism yet "
+            f"(got --tp-size {tp_size}). The Domino rollout's TP global-argmax "
+            "reductions are unported and the tree builders assume a dense TP=1 "
+            "LM head. Run with --tp-size 1."
+        )
+
+    if algo_name == "DOMINOTREE":
+        page_size = int(getattr(server_args, "page_size", 1) or 1)
+        if page_size != 1:
+            raise NotImplementedError(
+                f"DOMINOTREE does not support --page-size {page_size}: the tree "
+                "verify KV path (reserved-slot dual-use in the draft block, "
+                "accepted-path compaction, front-slot draft-KV commit) assumes "
+                "page_size == 1. Run with --page-size 1."
+            )
+        if getattr(server_args, "speculative_draft_window_size", None) is not None:
+            raise NotImplementedError(
+                "DOMINOTREE does not support --speculative-draft-window-size "
+                "(compact draft cache): the tree draft block reads the "
+                "scheduler-reserved verify slots directly and assumes the "
+                "non-windowed DFLASH draft-KV layout."
+            )
+
+
 class DominoWorkerV2(DFlashWorkerV2):
     """DFLASH v2 worker with the Domino GRU-corrected chain rollout."""
 
+    _algo_name = "DOMINO"
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+
+        # Re-assert launch invariants in the scheduler subprocess (P5): the
+        # handle_server_args guard runs in the main process only; programmatic
+        # launches may skip it. TODO(P8-8B/TP): relax the TP guard (see
+        # assert_domino_server_args_supported).
+        assert_domino_server_args_supported(self.server_args, self._algo_name)
 
         self.domino_helper: Optional[DFlashDominoHelper] = None
         self.domino_rollout: Optional[DFlashDominoRollout] = None
@@ -200,10 +249,51 @@ class DominoTreeWorkerV2(DominoWorkerV2):
     spec_class enables the custom-mask DFLASH verify graph in handle_server_args),
     so ``--disable-cuda-graph`` is OPTIONAL — kept as an eager fallback. See
     PORT_NOTES.md.
+
+    P5 (correctness gate): unsupported configs FAIL FAST instead of running
+    silently (TP>1, page_size!=1, compact draft cache, Mamba/hybrid target at
+    server level; return_logprob / grammar per request), and any chain-verify
+    FALLBACK on a cuda-graph server is forced EAGER (``_chain_fallback``): the
+    P4b hook captures the target-verify graph WITH a ``custom_mask_buf``, but
+    upstream's chain verify passes ``custom_mask=None`` (dflash_worker_v2.py:1504),
+    so a graph replay would reuse a stale mask -> wrong commits.
     """
+
+    _algo_name = "DOMINOTREE"
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+
+        # P5 server-level guard: Mamba/hybrid targets. Upstream's chain verify
+        # commits Mamba states after verify (dflash_worker_v2.py:1518-1521), but
+        # our tree verify path does not port commit_mamba_states_after_verify
+        # (spec_utils.py:577), so accepted-path Mamba states would silently never
+        # be committed. Detect from the target model CONFIG (hybrid_gdn_config /
+        # mamba2_config), which is available at draft-worker init — the target
+        # attn_backend is constructed LATER, so reading `.attn_backend` here
+        # AttributeErrors on the pinned build. Best-effort + fully defensive: a
+        # detection failure must never crash init for the common non-Mamba case.
+        target_mr = self.target_worker.model_runner
+        try:
+            is_mamba_target = (
+                getattr(target_mr, "hybrid_gdn_config", None) is not None
+                or getattr(target_mr, "mamba2_config", None) is not None
+            )
+            backend = getattr(target_mr, "attn_backend", None)
+            if backend is not None and hasattr(
+                backend, "update_mamba_state_after_mtp_verify"
+            ):
+                is_mamba_target = True
+        except Exception:  # detection is best-effort; never break launch
+            is_mamba_target = False
+        if is_mamba_target:
+            raise NotImplementedError(
+                "DOMINOTREE does not support Mamba/hybrid target models: the "
+                "tree verify path does not port commit_mamba_states_after_verify, "
+                "so accepted-path Mamba states would never be committed. Use a "
+                "non-Mamba target, or --speculative-algorithm DOMINO / DFLASH "
+                "(chain verify, which handles Mamba upstream)."
+            )
 
         # Verify node budget N == DFLASH block_size, so ALL DFLASH KV/buffer
         # sizing (reserved per-decode tokens, cuda-graph widths) is reused with
@@ -266,11 +356,21 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             )
 
     def forward_batch_generation(self, model_worker_batch, on_publish=None):
+        # P5 per-request guards — BEFORE any routing (tree OR chain), so an
+        # unsupported request fails with a clear error instead of silently
+        # producing wrong output. First line of defense is upstream's
+        # validate_dflash_request (scheduler.py:2120, fires because we report
+        # is_dflash()=True), which gracefully aborts these requests before
+        # scheduling; these raises are the worker-level backstop.
+        self._assert_request_supported(model_worker_batch)
+
         # Only the DECODE-verify stage differs from DFLASH/Domino. Route prefill/
         # extend/idle and any non-tree case back to the Domino chain worker
         # (which is itself lossless), then handle the greedy decode-verify here.
+        # Any fallback that can reach the chain DECODE verify must go through
+        # _chain_fallback (stale custom-mask graph replay; see class docstring).
         if self.tree_topology is None:
-            return super().forward_batch_generation(model_worker_batch, on_publish)
+            return self._chain_fallback(model_worker_batch, on_publish)
 
         mode = model_worker_batch.forward_mode
         if (
@@ -279,20 +379,94 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             or mode.is_idle()
             or model_worker_batch.spec_info is None
         ):
-            return super().forward_batch_generation(model_worker_batch, on_publish)
+            return self._chain_fallback(model_worker_batch, on_publish)
 
         sampling_info = getattr(model_worker_batch, "sampling_info", None)
         if sampling_info is None or not sampling_info.is_all_greedy:
-            # Phase 2 tree verify is greedy-only; fall back to lossless Domino chain.
+            # Tree verify is greedy-only (pre-P6); fall back to the lossless
+            # Domino chain, forcing its verify eager under cuda graphs.
             if not self._warned_tree_greedy_only:
                 logger.warning(
                     "DOMINOTREE tree verify supports T=0 greedy only; falling back "
-                    "to the Domino chain for non-greedy sampling."
+                    "to the Domino chain for non-greedy sampling (chain verify "
+                    "runs EAGER on a cuda-graph server; see _chain_fallback)."
                 )
                 self._warned_tree_greedy_only = True
-            return super().forward_batch_generation(model_worker_batch, on_publish)
+            return self._chain_fallback(model_worker_batch, on_publish)
 
         return self._tree_decode_forward(model_worker_batch, on_publish)
+
+    # -- P5 correctness gate: guards + safe chain fallback -------------------
+
+    def _assert_request_supported(self, model_worker_batch) -> None:
+        """Reject per-request features the DOMINOTREE paths cannot honor."""
+        if getattr(model_worker_batch, "return_logprob", False):
+            raise ValueError(
+                "DOMINOTREE does not support return_logprob: the tree verify "
+                "path does not port compute_spec_v2_logprobs. Re-send the "
+                "request without logprobs."
+            )
+        if getattr(model_worker_batch, "return_hidden_states", False):
+            raise ValueError(
+                "DOMINOTREE does not support return_hidden_states: the tree and "
+                "chain-fallback verify paths consume and clear the target hidden "
+                "states, so the client would silently receive empty hidden "
+                "states. (Upstream's validate_dflash_request rejects this only "
+                "when overlap is ENABLED; this plugin forces overlap off, so that "
+                "check never fires — hence this worker-level guard.) Re-send "
+                "without return_hidden_states."
+            )
+        if getattr(model_worker_batch, "has_grammar", False):
+            raise ValueError(
+                "DOMINOTREE does not support grammar-constrained decoding "
+                "(json_schema/regex/ebnf/structural_tag): the tree verify calls "
+                "eagle_sample without a grammar vocab mask, so constraints "
+                "would be silently ignored. Re-send without grammar constraints."
+            )
+
+    def _chain_fallback(self, model_worker_batch, on_publish):
+        """Run the inherited Domino chain path, forcing its target verify EAGER
+        when the decode CUDA graph is enabled.
+
+        Why: the P4b hook makes the decode-graph capture allocate a flashinfer
+        ``custom_mask_buf`` for the DOMINOTREE target-verify graph (needed by
+        the tree's custom mask). Upstream's chain verify, however, builds
+        ``DFlashVerifyInput`` with ``custom_mask=None``
+        (dflash_worker_v2.py:1502-1513) and never refreshes that buffer, while
+        ``can_run_graph`` (decode_cuda_graph_runner.py:400-469) has no mask
+        gate — so a chain-verify graph REPLAY would rerun the captured
+        MaskMode.CUSTOM kernel against a stale/garbage mask buffer and commit
+        wrong tokens. Nulling ``decode_cuda_graph_runner`` for the duration
+        makes BOTH decision points (DFlashVerifyInput.prepare_for_verify:74-87
+        and ModelRunner._forward_raw:2978-2982) take the eager branch, which is
+        exactly the GPU-validated ``--disable-cuda-graph`` chain flow
+        (prepare_for_verify plans eager attn metadata; the verify forward runs
+        with metadata marked ready). The draft runner's own graphs and the
+        Domino rollout graph live on the DRAFT model runner and are untouched.
+
+        Post-P6 (T>0 routed to a sampling TREE verify) this helper remains only
+        for genuinely-unsupported fallbacks (e.g. non-Domino draft model) —
+        still correct, marginally slower, rarely hit.
+
+        NOTE: safe only because the worker is synchronous (handle_server_args
+        forces --disable-overlap-schedule). Revisit if overlap is ever enabled.
+        """
+        mode = model_worker_batch.forward_mode
+        reaches_chain_verify = not (
+            mode.is_extend()
+            or getattr(model_worker_batch, "is_extend_in_batch", False)
+            or mode.is_idle()
+        )
+        target_model_runner = self.target_worker.model_runner
+        graph_runner = getattr(target_model_runner, "decode_cuda_graph_runner", None)
+        if not reaches_chain_verify or graph_runner is None:
+            return super().forward_batch_generation(model_worker_batch, on_publish)
+
+        target_model_runner.decode_cuda_graph_runner = None
+        try:
+            return super().forward_batch_generation(model_worker_batch, on_publish)
+        finally:
+            target_model_runner.decode_cuda_graph_runner = graph_runner
 
     # -- draft -------------------------------------------------------------
 
