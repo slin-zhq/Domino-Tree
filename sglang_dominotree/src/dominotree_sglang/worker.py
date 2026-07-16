@@ -92,6 +92,43 @@ def assert_domino_server_args_supported(server_args, algo_name: str) -> None:
                 "scheduler-reserved verify slots directly and assumes the "
                 "non-windowed DFLASH draft-KV layout."
             )
+        # P6: T>0 uses tree_speculative_sampling with THRESHOLD acceptance
+        # (draft_probs=zeros). Rejection sampling would instead require a
+        # target-vocab draft proposal distribution, which the greedy Domino draft
+        # does not produce (eagle_utils.py:498-505 raises on missing draft_probs).
+        if getattr(server_args, "speculative_use_rejection_sampling", False):
+            raise NotImplementedError(
+                "DOMINOTREE does not support --speculative-use-rejection-sampling: "
+                "rejection sampling needs a target-vocab draft proposal "
+                "distribution (draft_probs), but the Domino draft is greedy/argmax "
+                "and produces none. Use the default threshold acceptance "
+                "(speculative_accept_threshold_*), which matches the official "
+                "Domino SGLang baseline."
+            )
+        # P6 losslessness: the T>0 tree verify (tree_speculative_sampling_target_only)
+        # is exact ONLY at threshold 1.0/1.0. Lower thresholds enable SGLang's
+        # "typical acceptance", which over-accepts and makes the committed T>0
+        # distribution deviate from the target's -> silently NOT lossless.
+        thr_single = getattr(server_args, "speculative_accept_threshold_single", 1.0)
+        thr_acc = getattr(server_args, "speculative_accept_threshold_acc", 1.0)
+        if thr_single != 1.0 or thr_acc != 1.0:
+            raise NotImplementedError(
+                "DOMINOTREE requires speculative_accept_threshold_single == 1.0 and "
+                f"speculative_accept_threshold_acc == 1.0 (exact spec sampling); got "
+                f"single={thr_single}, acc={thr_acc}. Non-default thresholds enable "
+                "SGLang typical-acceptance, which breaks the T>0 lossless guarantee. "
+                "Run with the defaults (1.0)."
+            )
+        # P6 losslessness: eagle_sample does NOT apply custom logit processors
+        # (unlike the DFLASH chain, dflash_utils.py:170-174), so at T>0 they would
+        # be silently ignored -> wrong distribution.
+        if getattr(server_args, "enable_custom_logit_processor", False):
+            raise NotImplementedError(
+                "DOMINOTREE does not support --enable-custom-logit-processor: the "
+                "tree verify (eagle_sample) does not apply custom logit processors, "
+                "so they would be silently ignored at T>0. Use "
+                "--speculative-algorithm DOMINO (chain), which applies them."
+            )
 
 
 class DominoWorkerV2(DFlashWorkerV2):
@@ -239,11 +276,14 @@ class DominoTreeWorkerV2(DominoWorkerV2):
       ``prefix_len = draft_model.pure_draft_prefix_len``, budget = block_size-1.
     * **toy (P2, A/B via ``DOMINOTREE_BUILDER=toy``)** — a fixed caterpillar tree.
 
-    Losslessness is BY CONSTRUCTION for both (greedy tree verify only accepts
-    argmax-matching tokens). Constraints: T=0 greedy only, TP=1 only (the builder
-    reads the dense LM head + runs a per-node GRU on the host), page_size==1,
-    non-mamba target, no compact-draft-cache window. Anything else falls back to
-    the lossless Domino chain.
+    Losslessness is BY CONSTRUCTION at every temperature: at T=0 the greedy tree
+    verify only accepts argmax-matching tokens; at T>0 (P6) eagle_sample's
+    tree_speculative_sampling_target_only is the distribution-preserving threshold
+    sampler (draft stays greedy; only acceptance is temperature-aware). Constraints:
+    TP=1 only (the builder reads the dense LM head + runs a per-node GRU on the
+    host), page_size==1, non-mamba target, no compact-draft-cache window, no
+    rejection sampling (greedy draft produces no draft_probs). Anything else falls
+    back to the lossless Domino chain.
 
     P4: the tree verify now runs under the decode CUDA graph (the DOMINOTREE
     spec_class enables the custom-mask DFLASH verify graph in handle_server_args),
@@ -298,7 +338,6 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         # Verify node budget N == DFLASH block_size, so ALL DFLASH KV/buffer
         # sizing (reserved per-decode tokens, cuda-graph widths) is reused with
         # no server-arg override.
-        self._warned_tree_greedy_only = False
         self.tree_num_nodes = int(self.block_size)
 
         def _env_int(name, default):
@@ -381,17 +420,16 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         ):
             return self._chain_fallback(model_worker_batch, on_publish)
 
+        # P6: route BOTH greedy (T=0) and sampled (T>0) decode-verify through the
+        # TREE. The draft stays greedy at every temperature (our convention,
+        # matched to official Domino-on-SGLang which also drafts greedily); only
+        # the ACCEPTANCE differs, and eagle_sample dispatches internally on
+        # sampling_info.is_all_greedy: verify_tree_greedy (T=0) vs
+        # tree_speculative_sampling_target_only (T>0), the distribution-preserving
+        # threshold sampler EAGLE uses. sampling_info is None only for
+        # non-generation batches -> chain fallback.
         sampling_info = getattr(model_worker_batch, "sampling_info", None)
-        if sampling_info is None or not sampling_info.is_all_greedy:
-            # Tree verify is greedy-only (pre-P6); fall back to the lossless
-            # Domino chain, forcing its verify eager under cuda graphs.
-            if not self._warned_tree_greedy_only:
-                logger.warning(
-                    "DOMINOTREE tree verify supports T=0 greedy only; falling back "
-                    "to the Domino chain for non-greedy sampling (chain verify "
-                    "runs EAGER on a cuda-graph server; see _chain_fallback)."
-                )
-                self._warned_tree_greedy_only = True
+        if sampling_info is None:
             return self._chain_fallback(model_worker_batch, on_publish)
 
         return self._tree_decode_forward(model_worker_batch, on_publish)
@@ -422,6 +460,19 @@ class DominoTreeWorkerV2(DominoWorkerV2):
                 "(json_schema/regex/ebnf/structural_tag): the tree verify calls "
                 "eagle_sample without a grammar vocab mask, so constraints "
                 "would be silently ignored. Re-send without grammar constraints."
+            )
+        # P6 losslessness: eagle_sample applies only temperature/top_k/top_p — NOT
+        # min_p — so a min_p request would sample the tree from the wrong T>0
+        # distribution silently.
+        sampling_info = getattr(model_worker_batch, "sampling_info", None)
+        if sampling_info is not None and getattr(
+            sampling_info, "need_min_p_sampling", False
+        ):
+            raise ValueError(
+                "DOMINOTREE does not support min_p sampling: the tree verify "
+                "(eagle_sample) applies only temperature/top_k/top_p, so min_p "
+                "would be silently ignored (wrong distribution at T>0). Re-send "
+                "without min_p, or use --speculative-algorithm DOMINO (chain)."
             )
 
     def _chain_fallback(self, model_worker_batch, on_publish):
@@ -875,7 +926,9 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         )
         logits_output = target_out.logits_output
 
-        # 7) Tree acceptance (greedy). accept_lens includes the bonus token.
+        # 7) Tree acceptance. eagle_sample dispatches greedy (T=0) vs
+        # threshold-sampled (T>0) internally on sampling_info; accept_lens
+        # includes the bonus token.
         predict, accept_lens, accept_index = eagle_sample(
             verify_input, batch, logits_output, None
         )
