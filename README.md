@@ -64,8 +64,10 @@ DominoTree can also run inside the **SGLang** production serving engine — not 
 single-stream research harness above — as an out-of-tree speculative-decoding plugin (the
 package under `sglang_dominotree/`). It registers a `DOMINOTREE` speculative algorithm on
 **stock upstream SGLang** and reuses SGLang's EAGLE tree-verify; it vendors Domino's
-official GRU-correction head (copied verbatim, not reimplemented) and adds our conditional
-best-first tree builder with a GPU-native CUDA-graph builder.
+official GRU-correction head (copied verbatim, not reimplemented — see
+[`sglang_dominotree/PROVENANCE.md`](sglang_dominotree/PROVENANCE.md) for the manifest and a
+one-command proof that the copy is byte-identical to the official fork) and adds our
+conditional best-first tree builder with a GPU-native CUDA-graph builder.
 
 > **Status:** on the `sglang-integration` branch; validated on an RTX 5080 (Qwen3-4B pair,
 > TP=1) at temperature 0 — lossless, ~1.9× faster tree construction via the GPU-native
