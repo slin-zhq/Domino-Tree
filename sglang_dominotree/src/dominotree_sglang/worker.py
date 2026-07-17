@@ -267,7 +267,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
     ``move_accept_tokens_to_target_kvcache`` + ``_compact_accept_to_front``) so
     DFLASH's prefix-only draft-KV writer is reused verbatim.
 
-    Two tree builders share that verify seam:
+    Three tree builders share that verify seam:
 
     * **conditional (P3, DEFAULT)** — the paper's method: a per-request adaptive,
       variable-width **best-first** tree built by the Domino GRU-correction scorer
@@ -275,6 +275,12 @@ class DominoTreeWorkerV2(DominoWorkerV2):
       ``DOMINOTREE_NODE_TOPK`` (8), ``DOMINOTREE_CORR_TOPM`` (64; 0=full-vocab),
       ``prefix_len = draft_model.pure_draft_prefix_len``, budget = block_size-1.
     * **toy (P2, A/B via ``DOMINOTREE_BUILDER=toy``)** — a fixed caterpillar tree.
+    * **frontier (Option B, ``DOMINOTREE_BUILDER=frontier``)** — the batched
+      depth-synchronous frontier builder (``tree/frontier.py``,
+      batch_builder_design.md §2B): same conditional scorer math, all bs trees
+      built on-device with zero host syncs, equal to the best-first tree up to
+      real-valued score ties. Opt-in until the §3 validation gates pass on GPU;
+      the default stays the per-request best-first builder.
 
     Losslessness is BY CONSTRUCTION at every temperature: at T=0 the greedy tree
     verify only accepts argmax-matching tokens; at T>0 (P6) eagle_sample's
@@ -347,7 +353,10 @@ class DominoTreeWorkerV2(DominoWorkerV2):
                 return default
 
         # P3 conditional best-first builder is the DEFAULT; DOMINOTREE_BUILDER=toy
-        # keeps the P2 fixed caterpillar reachable for A/B.
+        # keeps the P2 fixed caterpillar reachable for A/B;
+        # DOMINOTREE_BUILDER=frontier selects the Option B batched frontier
+        # builder (tree/frontier.py) — same conditional scorer, zero host syncs,
+        # NOT yet GPU-validated, so it is opt-in until the §3 gates pass.
         self.tree_builder = os.environ.get("DOMINOTREE_BUILDER", "conditional").strip()
         self.tree_node_topk = _env_int("DOMINOTREE_NODE_TOPK", 8)
         self.tree_corr_topm = _env_int("DOMINOTREE_CORR_TOPM", 64)
@@ -360,6 +369,11 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         self.tree_gpu_builder = _env_int("DOMINOTREE_GPU_BUILDER", 1) != 0
         self._gpu_expander = None
         self._gpu_expander_failed = False
+
+        # Option B batched frontier builder (DOMINOTREE_BUILDER=frontier).
+        # Constructed lazily on first decode, like the GPU expander.
+        self._frontier_builder = None
+        self._frontier_failed = False
 
         self.tree_topology = None
         # `domino_rollout is not None` <=> the draft model has the Domino
@@ -699,7 +713,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             )
         return self._gpu_expander
 
-    def _build_conditional_tree_for_req(self, draft_hidden_1, verified_scalar):
+    def _build_conditional_tree_for_req(self, ph, base_logits, root_state, verified_scalar):
         """Build one request's conditional best-first tree (batch=1).
 
         Returns ``(tokens[N], parent[N], depth[N])`` PADDED to exactly N nodes,
@@ -708,8 +722,17 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         never match the target's greedy argmax and are leaves, so they can never
         be accepted and never alter the accepted path.
 
-        ``draft_hidden_1`` is ``[N, H]`` (this request's draft-block hidden);
-        ``verified_scalar`` is the committed root token id.
+        Phase 0 (batch_builder_design.md §3): the per-request SETUP — shift_label
+        slicing, the LM-head matmul, and the root-state GRU — is computed batched
+        in ``_build_conditional_trees`` and passed in per-request:
+
+        * ``ph``: ``[k_draft, H]`` this request's shift_label-sliced draft hidden
+          (domino_adapter.py:92-96);
+        * ``base_logits``: ``[k_draft, V]`` = target.lm_head(ph) (TP=1 dense head,
+          domino_adapter.py:95);
+        * ``root_state``: ``(1, 1, gru_dim)`` = prefix_gru(embed_tokens(verified))
+          hidden (domino_adapter.py:97);
+        * ``verified_scalar``: the committed root token id (host int).
         """
         from .tree.best_first import build_best_first_tree
         from .tree.conditional_children import make_conditional_children_fn
@@ -718,27 +741,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         device = self.device
         target_model = self.target_worker.model_runner.model
         embed_tokens = target_model.get_input_embeddings()
-        lm_head = target_model.lm_head
         draft_model = self.draft_model
-        shift_label = bool(getattr(draft_model, "shift_label", False))
-
-        # ph: per-position draft hidden, shift_label-sliced (domino_adapter.py:92-96).
-        #   shift_label=False -> last (N-1) rows = draft_hidden[1:]  (k_draft=N-1)
-        #   shift_label=True  -> all N rows                          (k_draft=N)
-        if shift_label:
-            ph = draft_hidden_1
-        else:
-            ph = draft_hidden_1[-(n - 1):]
-        # base_logits = target.lm_head(ph) (domino_adapter.py:95); TP=1 dense head.
-        weight = lm_head.weight  # [V, H] full at TP=1
-        ph_cast = ph.to(weight.dtype) if ph.dtype != weight.dtype else ph
-        base_logits = torch.matmul(ph_cast, weight.T)  # [k_draft, V]
-
-        # root_state = prefix_gru(embed_tokens(verified)) hidden (domino_adapter.py:97).
-        root_emb = embed_tokens(
-            torch.tensor([[int(verified_scalar)]], device=device, dtype=torch.long)
-        )
-        _, root_state = draft_model.prefix_gru(root_emb)  # (1, 1, gru_dim)
 
         # children_fn: P4 GPU CUDA-graph expander (default) or P3 pure-Python.
         # The GPU expander is bit-equivalent to make_conditional_children_fn (its
@@ -798,14 +801,62 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         return tokens[:n], parent[:n], depth[:n]
 
     def _build_conditional_trees(self, draft_hidden, verified, bs, n, device):
-        """Build a per-request conditional tree; return (draft_tokens[bs,N], intra_mask[bs,N,N])."""
+        """Build a per-request conditional tree; return (draft_tokens[bs,N], intra_mask[bs,N,N]).
+
+        Phase 0 (batch_builder_design.md §3): the tree-build SETUP is hoisted out
+        of the serial per-request loop and computed batched — one host sync + two
+        batched kernels instead of one ``.item()`` sync plus two tiny kernels per
+        request. The values fed to each request's builder are the same math as
+        the old per-request setup (same dtype handling, same matmul operands,
+        same GRU module); only WHERE the compute happens changes. The per-request
+        expander + best-first heap (the Phase 1 target) are untouched.
+        """
         from .tree.toy_tree import build_intra_tree_mask_from_parents
+
+        target_model = self.target_worker.model_runner.model
+        draft_model = self.draft_model
+        shift_label = bool(getattr(draft_model, "shift_label", False))
+
+        # (1) ONE GPU->CPU sync for ALL root token ids (was int(verified[b].item())
+        # per request).
+        verified_list = verified.tolist()
+
+        # ph_all: per-position draft hidden, shift_label-sliced
+        # (domino_adapter.py:92-96), whole batch at once.
+        #   shift_label=False -> last (N-1) rows per request (k_draft = N-1)
+        #   shift_label=True  -> all N rows                  (k_draft = N)
+        if shift_label:
+            ph_all = draft_hidden  # [bs, N, H]
+        else:
+            ph_all = draft_hidden[:, -(n - 1):, :]  # [bs, N-1, H]
+
+        # (2) ONE batched LM-head matmul (was bs separate [k_draft,H]x[H,V]
+        # GEMMs); torch.matmul folds [bs,k_draft,H]@[H,V] into a single
+        # [bs*k_draft,H]@[H,V] mm. base_logits_all is a TRANSIENT (~139 MB bf16
+        # at bs=32, V=151K) freed when this function returns — do NOT keep it as
+        # a persistent buffer. Phase 1 (batch_builder_design.md §2A) reduces it
+        # immediately to [bs,k_draft,corr_topm]-sized statics; Phase 0 only
+        # batches the matmul.
+        weight = target_model.lm_head.weight  # [V, H] full at TP=1
+        ph_cast = ph_all.to(weight.dtype) if ph_all.dtype != weight.dtype else ph_all
+        base_logits_all = torch.matmul(ph_cast, weight.T)  # [bs, k_draft, V]
+
+        # (3) ONE batched root-state GRU over the [bs] verified tokens (was bs
+        # separate 1-token GRU calls). prefix_gru is batch_first, so
+        # root_states[:, b:b+1, :] == the (1, 1, gru_dim) hidden the per-request
+        # prefix_gru(embed_tokens(verified_b)) call produced.
+        embed_tokens = target_model.get_input_embeddings()
+        root_emb_all = embed_tokens(verified.view(bs, 1).to(torch.long))  # [bs,1,E]
+        _, root_states = draft_model.prefix_gru(root_emb_all)  # (1, bs, gru_dim)
 
         all_tokens = []
         all_parents = []
         for b in range(bs):
             tokens, parent, _depth = self._build_conditional_tree_for_req(
-                draft_hidden[b], int(verified[b].item())
+                ph_all[b],
+                base_logits_all[b],
+                root_states[:, b : b + 1, :],
+                verified_list[b],
             )
             all_tokens.append(tokens)
             all_parents.append(parent)
@@ -816,6 +867,108 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             all_parents, n=n, device=device
         )  # [bs, N, N]
         return draft_tokens_2d, intra_mask
+
+    # -- batched frontier tree (Option B, DOMINOTREE_BUILDER=frontier) ------
+
+    def _get_frontier_builder(self):
+        """Lazily build the Option B batched frontier builder
+        (batch_builder_design.md §2B, ``tree/frontier.py``). Returns None
+        (once) if unavailable so ``_build_frontier_trees`` falls back to the
+        per-request best-first builder."""
+        if self._frontier_builder is not None or self._frontier_failed:
+            return self._frontier_builder
+        try:
+            from .tree.frontier import FrontierTreeBuilder
+
+            n = int(self.block_size)
+            shift_label = bool(getattr(self.draft_model, "shift_label", False))
+            k_draft = n if shift_label else n - 1
+            embed_tokens = self.target_worker.model_runner.model.get_input_embeddings()
+            self._frontier_builder = FrontierTreeBuilder(
+                draft=self.draft_model,
+                embed_tokens=embed_tokens,
+                k_draft=k_draft,
+                prefix_len=self.tree_prefix_len,
+                node_topk=self._effective_node_topk(),
+                corr_topm=self.tree_corr_topm,
+                budget=n - 1,
+                max_depth=n,
+                mask_token_id=int(self._mask_token_id),
+                device=self.device,
+            )
+            logger.info(
+                "DOMINOTREE frontier builder ready (k_draft=%d, node_topk=%d, "
+                "corr_topm=%d, prefix_len=%d, width=%d, depths=%d).",
+                k_draft,
+                self._effective_node_topk(),
+                self.tree_corr_topm,
+                self.tree_prefix_len,
+                self._frontier_builder.W,
+                self._frontier_builder.D,
+            )
+        except Exception as e:
+            self._frontier_failed = True
+            self._frontier_builder = None
+            logger.warning(
+                "DOMINOTREE frontier builder unavailable; using the per-request "
+                "best-first conditional builder. Reason: %s",
+                e,
+            )
+        return self._frontier_builder
+
+    def _build_frontier_trees(self, draft_hidden, verified, bs, n, device):
+        """Option B (batch_builder_design.md §2B): depth-synchronous batched
+        frontier build of ALL bs trees on-device with ZERO host syncs.
+
+        Same batched setup as Phase 0's ``_build_conditional_trees`` (shift_label
+        slicing, one LM-head matmul, one root-state GRU), but ``verified`` stays
+        a DEVICE tensor (no ``.tolist()``), the per-request heap loop is replaced
+        by the batched frontier depth-loop, and the flat tokens + intra mask are
+        emitted as device tensors (no ``torch.tensor(all_tokens)`` H2D, no
+        Python mask build). ``base_logits_all`` remains a TRANSIENT freed on
+        return (the builder reduces it to [bs, k_draft, corr_topm] statics).
+
+        Equivalence: the frontier build reproduces ``build_best_first_tree`` +
+        the conditional scorer exactly up to real-valued score ties and batched-
+        GEMM ULPs (frontier.py docstring; ``_frontier_equivalence_suite`` is the
+        gate) — the verify path is untouched, so losslessness is unchanged by
+        construction, and tau is preserved statistically rather than
+        bit-identically.
+        """
+        builder = self._get_frontier_builder()
+        if builder is None:
+            return self._build_conditional_trees(draft_hidden, verified, bs, n, device)
+
+        target_model = self.target_worker.model_runner.model
+        draft_model = self.draft_model
+        shift_label = bool(getattr(draft_model, "shift_label", False))
+
+        if shift_label:
+            ph_all = draft_hidden  # [bs, N, H]
+        else:
+            ph_all = draft_hidden[:, -(n - 1):, :]  # [bs, N-1, H]
+
+        weight = target_model.lm_head.weight  # [V, H] full at TP=1
+        ph_cast = ph_all.to(weight.dtype) if ph_all.dtype != weight.dtype else ph_all
+        base_logits_all = torch.matmul(ph_cast, weight.T)  # transient [bs, k_draft, V]
+
+        embed_tokens = target_model.get_input_embeddings()
+        root_emb_all = embed_tokens(verified.view(bs, 1).to(torch.long))  # [bs,1,E]
+        _, root_states = draft_model.prefix_gru(root_emb_all)  # (1, bs, gru_dim)
+
+        try:
+            return builder.build(ph_all, base_logits_all, root_states, verified)
+        except TypeError as e:
+            # Mixed server dtypes (see the GPU-expander guard above): fall back
+            # to the per-request builder rather than crash mid-decode.
+            logger.warning(
+                "DOMINOTREE frontier builder dtype mismatch (%s); using the "
+                "per-request best-first conditional builder.",
+                e,
+            )
+            self._frontier_failed = True
+            self._frontier_builder = None
+            return self._build_conditional_trees(draft_hidden, verified, bs, n, device)
 
     # -- decode + tree verify ---------------------------------------------
 
@@ -847,10 +1000,16 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         draft_hidden = self._domino_draft_block(batch)  # [bs, N, H]
 
         # 2) Assemble the tree: DEFAULT = per-request conditional best-first tree
-        # (P3, the paper's method); DOMINOTREE_BUILDER=toy = P2 fixed caterpillar.
+        # (P3, the paper's method); DOMINOTREE_BUILDER=toy = P2 fixed caterpillar;
+        # DOMINOTREE_BUILDER=frontier = Option B batched frontier (same
+        # conditional scorer, zero host syncs; opt-in until GPU-validated).
         if self.tree_builder == "toy":
             draft_tokens_2d, intra_mask = self._toy_tree_tokens(
                 draft_hidden, verified, bs, device
+            )
+        elif self.tree_builder == "frontier":
+            draft_tokens_2d, intra_mask = self._build_frontier_trees(
+                draft_hidden, verified, bs, n, device
             )
         else:
             draft_tokens_2d, intra_mask = self._build_conditional_trees(

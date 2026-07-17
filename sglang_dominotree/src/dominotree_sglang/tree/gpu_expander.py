@@ -425,17 +425,212 @@ def _equivalence_suite(device: torch.device) -> None:
                 raise AssertionError("children_fn before begin_round must raise")
 
 
+def _flat_reference_tree(nodes, verified_tok: int, n: int, mask_token_id: int):
+    """Flatten + dead-leaf-pad a ``build_best_first_tree`` node list with the
+    EXACT semantics of ``worker._build_conditional_tree_for_req``: root at flat
+    index 0, nodes in pop order, then ``mask_token_id`` children of the root
+    (flat depth 1) up to ``n`` entries."""
+    tokens = [int(verified_tok)]
+    parents = [-1]
+    depths = [0]
+    cums = [0.0]
+    for nd in nodes:
+        tokens.append(int(nd.token))
+        parents.append(0 if nd.parent == -1 else 1 + int(nd.parent))
+        depths.append(1 + int(nd.depth))
+        cums.append(float(nd.cum_logprob))
+    while len(tokens) < n:
+        tokens.append(int(mask_token_id))
+        parents.append(0)
+        depths.append(1)
+        cums.append(float("-inf"))
+    return tokens[:n], parents[:n], depths[:n], cums[:n]
+
+
+def _frontier_equivalence_suite(device: torch.device) -> None:
+    """PRIMARY correctness gate for the Option B frontier builder
+    (batch_builder_design.md §2B / §3 gate 1).
+
+    On tiny random models with TIE-FREE inputs (continuous random logits; exact
+    float score ties have measure zero — required because the heap and the
+    frontier break real ties differently, see frontier.py docstring), assert
+    that the batched frontier build reproduces the per-request reference
+    ``build_best_first_tree`` + ``make_conditional_children_fn`` EXACTLY:
+    identical flat ``(token, parent, depth)`` lists per request (which also
+    checks node ORDER == heap pop order and the parents-before-children
+    invariant), ``cum_logprob`` within 1e-5, identical dead-leaf padding, and
+    an ``intra_mask`` equal to ``build_intra_tree_mask_from_parents`` on the
+    reference parents. bs in {1, 2, 5, 32}; 2 decode steps per config
+    (static-buffer reuse). On CUDA the build additionally runs under
+    ``torch.cuda.set_sync_debug_mode("error")`` to prove ZERO host syncs.
+    """
+    from .best_first import build_best_first_tree
+    from .conditional_children import make_conditional_children_fn
+    from .frontier import FrontierTreeBuilder
+    from .toy_tree import build_intra_tree_mask_from_parents
+
+    torch.manual_seed(0)
+    vocab, hidden, gru_dim, mlp_dim = 89, 12, 10, 24
+    mask_token_id = vocab - 1
+    target = _TinyTarget(vocab, hidden).to(device).eval()
+    draft = _TinyDraft(hidden, gru_dim, mlp_dim, vocab).to(device).eval()
+    embed_tokens = target.get_input_embeddings()
+
+    # (corr_topm, prefix_len, k_draft, node_topk, budget). The first five mirror
+    # the GraphNodeExpander matrix (all three scorer cases + mixed prefix/corr
+    # + node_topk == corr_topm). The last two are structural edges:
+    # k_draft=2/node_topk=2 exhausts the candidate tree (6 finite nodes <
+    # budget=12 -> real dead-leaf padding), and budget=2 makes W=B < node_topk
+    # (frontier keep drops candidates every depth).
+    cases = [
+        (8, 1, 5, 3, 12),
+        (8, 0, 5, 3, 12),
+        (0, 0, 5, 3, 12),
+        (0, 2, 5, 3, 12),
+        (3, 5, 5, 3, 12),
+        (8, 1, 2, 2, 12),
+        (8, 1, 5, 3, 2),
+    ]
+
+    with torch.no_grad():
+        for corr_topm, prefix_len, k_draft, node_topk, budget in cases:
+            n = budget + 1
+            builder = FrontierTreeBuilder(
+                draft=draft,
+                embed_tokens=embed_tokens,
+                k_draft=k_draft,
+                prefix_len=prefix_len,
+                node_topk=node_topk,
+                corr_topm=corr_topm,
+                budget=budget,
+                max_depth=k_draft,
+                mask_token_id=mask_token_id,
+                device=device,
+            )
+            for bs in (1, 2, 5, 32):
+                for step in range(2):  # static-buffer reuse across decode steps
+                    gen = torch.Generator().manual_seed(
+                        100_000 * step
+                        + 1_000 * bs
+                        + 100 * corr_topm
+                        + 10 * prefix_len
+                        + k_draft
+                        + budget
+                    )
+                    ph = torch.randn(bs, k_draft, hidden, generator=gen).to(device)
+                    base_logits = torch.randn(bs, k_draft, vocab, generator=gen).to(
+                        device
+                    )
+                    root_states = torch.randn(1, bs, gru_dim, generator=gen).to(device)
+                    verified = torch.randint(
+                        0, vocab, (bs,), generator=gen, dtype=torch.long
+                    ).to(device)
+
+                    if device.type == "cuda":
+                        # Gate: the build must be sync-free end to end.
+                        torch.cuda.set_sync_debug_mode(2)
+                    try:
+                        tokens_2d, intra_mask, aux = builder.build(
+                            ph, base_logits, root_states, verified, return_aux=True
+                        )
+                    finally:
+                        if device.type == "cuda":
+                            torch.cuda.set_sync_debug_mode(0)
+
+                    ref_parents_all = []
+                    for b in range(bs):
+                        ref_fn = make_conditional_children_fn(
+                            ph=ph[b],
+                            base_logits=base_logits[b],
+                            draft_model=draft,
+                            embed_tokens=embed_tokens,
+                            node_topk=node_topk,
+                            corr_topm=corr_topm,
+                            prefix_len=prefix_len,
+                            device=device,
+                        )
+                        ref_nodes = build_best_first_tree(
+                            ref_fn, root_states[:, b : b + 1, :], budget, k_draft
+                        )
+                        r_tok, r_par, r_dep, r_cum = _flat_reference_tree(
+                            ref_nodes, int(verified[b].item()), n, mask_token_id
+                        )
+                        ref_parents_all.append(r_par)
+                        key = (
+                            f"corr_topm={corr_topm} prefix_len={prefix_len} "
+                            f"k_draft={k_draft} budget={budget} bs={bs} "
+                            f"step={step} b={b} device={device}"
+                        )
+                        f_tok = tokens_2d[b].tolist()
+                        f_par = aux["parents"][b].tolist()
+                        f_dep = aux["depths"][b].tolist()
+                        f_cum = aux["cum_logprobs"][b].tolist()
+                        assert f_tok == r_tok, (key, f_tok, r_tok)
+                        assert f_par == r_par, (key, f_par, r_par)
+                        assert f_dep == r_dep, (key, f_dep, r_dep)
+                        # cum_logprob sums ~depth bf16 log-probs; CUDA fp
+                        # reductions differ from the per-request reference by
+                        # ~1e-5..1e-3 (the "bit-identity is the wrong bar" effect).
+                        # The TREE (token/parent/depth) is asserted EXACTLY above;
+                        # this only sanity-bounds the score, so use a device-aware tol.
+                        cum_tol = 1e-2 if "cuda" in str(key) else 1e-5
+                        for i, (rc, fc) in enumerate(zip(r_cum, f_cum)):
+                            if rc == float("-inf"):
+                                assert fc == float("-inf"), (key, i, fc)
+                            else:
+                                assert abs(rc - fc) < cum_tol, (key, i, rc, fc)
+
+                    ref_mask = build_intra_tree_mask_from_parents(
+                        ref_parents_all, n=n, device=device
+                    )
+                    assert torch.equal(intra_mask, ref_mask), (
+                        f"intra_mask mismatch: corr_topm={corr_topm} "
+                        f"prefix_len={prefix_len} k_draft={k_draft} "
+                        f"budget={budget} bs={bs} step={step}"
+                    )
+
+            # Contract edge: dtype guard (no silent cast).
+            bad_ph = torch.randn(1, k_draft, hidden).to(
+                device=device, dtype=torch.float16
+            )
+            bad_logits = torch.randn(1, k_draft, vocab).to(
+                device=device, dtype=torch.float16
+            )
+            try:
+                builder.build(
+                    bad_ph,
+                    bad_logits,
+                    torch.randn(1, 1, gru_dim).to(device),
+                    torch.zeros(1, dtype=torch.long, device=device),
+                )
+            except TypeError:
+                pass
+            else:
+                raise AssertionError("frontier build with wrong dtype must raise")
+
+
 def _self_test() -> None:
     _equivalence_suite(torch.device("cpu"))
     print("gpu_expander self-test (cpu, eager-static vs pure-Python): ALL PASSED")
+    _frontier_equivalence_suite(torch.device("cpu"))
+    print(
+        "frontier self-test (cpu, batched frontier vs best-first heap, "
+        "bs=1/2/5/32 x 2 steps): ALL PASSED"
+    )
     if torch.cuda.is_available():
         _equivalence_suite(torch.device("cuda"))
         print(
             "gpu_expander self-test (cuda, CUDA-graph replay vs pure-Python): ALL PASSED"
         )
+        _frontier_equivalence_suite(torch.device("cuda"))
+        print(
+            "frontier self-test (cuda, sync-free batched frontier vs best-first "
+            "heap): ALL PASSED"
+        )
     else:
         print(
-            "gpu_expander self-test: no CUDA device; graph capture/replay NOT exercised here"
+            "gpu_expander/frontier self-test: no CUDA device; graph replay and "
+            "the zero-sync gate NOT exercised here"
         )
 
 
