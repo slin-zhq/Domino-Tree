@@ -1,4 +1,4 @@
-"""Depth-synchronous batched GPU frontier builder (Option B, EAGER).
+"""Depth-synchronous batched GPU frontier builder (Option B).
 
 Implements ``batch_builder_design.md`` §2 Option B: replace the per-request
 best-first heap (``best_first.build_best_first_tree`` driven by the
@@ -72,15 +72,22 @@ CAVEAT: the ``corr_topm == 0`` full-vocab path reads the transient
 ``[bs, K, V]`` logits inside the depth loop and is therefore eager-only as
 structured (the production default is ``corr_topm = 64``).
 
-EAGER-ONLY in this commit: no CUDA-graph capture yet (follow-up).
+When ``DOMINOTREE_FRONTIER_GRAPH`` is not ``"0"``, the static-shape body is
+captured once per batch-size bucket and replayed on subsequent calls.  Capture
+is best-effort: any error permanently selects the eager path for this builder.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+import os
 
 import torch
 import torch.nn.functional as F
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -176,6 +183,15 @@ class FrontierTreeBuilder:
             raise ValueError("corr_topm must be <= vocab")
 
         self._states: dict[int, _State] = {}
+        # Graphs own the captured allocations; retain their associated static
+        # state in the per-bs pool for the lifetime of this builder.
+        self._graph_pool: dict[int, dict] = {}
+        self._graph_enabled = (
+            os.environ.get("DOMINOTREE_FRONTIER_GRAPH", "1") != "0"
+            and self.device.type == "cuda"
+            and self.corr_topm > 0
+        )
+        self._graph_failed = False
 
     # ------------------------------------------------------------------
     # Per-bs static state.
@@ -218,10 +234,42 @@ class FrontierTreeBuilder:
         self._states[bs] = st
         return st
 
+    def _get_or_capture_graph(self, bs: int, st: _State) -> dict:
+        """Return the CUDA graph for ``bs``, capturing it on first use.
+
+        ``_load_inputs`` has already copied this step's inputs into ``st``.
+        The warmup and capture deliberately operate only on those static
+        buffers, so replay can use the same copy-in -> replay -> read-out
+        sequence as the Domino rollout graph pool.
+        """
+        entry = self._graph_pool.get(bs)
+        if entry is not None:
+            return entry
+
+        # cuDNN GRU and allocator work must finish before capture.  Use a side
+        # stream so this follows the rollout graph-pool warmup discipline
+        # without perturbing the caller's current stream ordering.
+        current_stream = torch.cuda.current_stream(device=self.device)
+        warmup_stream = torch.cuda.Stream(device=self.device)
+        warmup_stream.wait_stream(current_stream)
+        with torch.cuda.stream(warmup_stream), torch.inference_mode():
+            for _ in range(3):
+                self._body(st, None)
+        current_stream.wait_stream(warmup_stream)
+        torch.cuda.synchronize(device=self.device)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            self._body(st, None)
+        entry = {"graph": graph, "state": st}
+        self._graph_pool[bs] = entry
+        logger.info("[DominoTree] captured CUDA graph for frontier builder bs=%d", bs)
+        return entry
+
     # ------------------------------------------------------------------
     # Input load: transient [bs, K, V] logits -> reduced statics. Runs OUTSIDE
-    # any future graph capture (analog of GraphNodeExpander.begin_round +
-    # _setup_impl, batched).
+    # graph capture (analog of GraphNodeExpander.begin_round + _setup_impl,
+    # batched).
     # ------------------------------------------------------------------
 
     def _load_inputs(
@@ -253,9 +301,9 @@ class FrontierTreeBuilder:
 
     # ------------------------------------------------------------------
     # The depth-synchronous body. Reads only static inputs + model weights,
-    # writes only static outputs; every intermediate has a static shape — this
-    # is the future CUDA-graph capture target (corr_topm > 0 only; the
-    # full-vocab path additionally reads the transient logits).
+    # writes only static outputs; every intermediate has a static shape.  It is
+    # CUDA-graph captured for corr_topm > 0 only; the full-vocab path also
+    # reads transient logits and therefore remains eager-only.
     # ------------------------------------------------------------------
 
     def _body(self, st: _State, base_logits_full: torch.Tensor | None) -> None:
@@ -431,7 +479,9 @@ class FrontierTreeBuilder:
     ):
         """Build all ``bs`` trees; return ``(draft_tokens_2d [bs, N] long,
         intra_mask [bs, N, N] bool)`` device tensors (plus an aux dict of
-        parents/depths/cum_logprobs when ``return_aux``). ZERO host syncs.
+        parents/depths/cum_logprobs when ``return_aux``).  Eager and steady-
+        state graph replay have zero host syncs; first graph capture warms up
+        and synchronizes once.
         """
         if ph.dtype != self.dtype or base_logits.dtype != self.dtype:
             raise TypeError(
@@ -443,7 +493,22 @@ class FrontierTreeBuilder:
         bs = int(ph.shape[0])
         st = self._get_state(bs)
         self._load_inputs(st, ph, base_logits, root_states, verified)
-        self._body(st, base_logits if self.corr_topm == 0 else None)
+        if self._graph_enabled and not self._graph_failed:
+            try:
+                self._get_or_capture_graph(bs, st)["graph"].replay()
+            except Exception:
+                # Capture/replay must be an optimization only.  A failed CUDA
+                # graph can leave the just-captured outputs unreliable, so
+                # re-run this step eagerly and do not retry capture later.
+                self._graph_failed = True
+                self._graph_pool.clear()
+                logger.exception(
+                    "[DominoTree] frontier CUDA graph failed; permanently "
+                    "falling back to eager execution"
+                )
+                self._body(st, None)
+        else:
+            self._body(st, base_logits if self.corr_topm == 0 else None)
         tokens = st.S_out_tokens.clone()
         mask = st.S_out_mask.clone()
         if not return_aux:
