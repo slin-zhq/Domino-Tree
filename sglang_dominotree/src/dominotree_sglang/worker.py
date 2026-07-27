@@ -35,6 +35,7 @@ from typing import Optional
 
 import torch
 
+from sglang.srt.distributed import get_tp_group
 from sglang.srt.speculative.dflash_worker_v2 import DFlashWorkerV2
 
 from .config import is_dflash_domino_projector
@@ -42,15 +43,6 @@ from .domino_helper import DFlashDominoHelper
 from .domino_rollout import DFlashDominoRollout
 
 logger = logging.getLogger(__name__)
-
-
-def _tp_argmax_not_implemented(*_args, **_kwargs):
-    raise NotImplementedError(
-        "Domino TP>1 rollout requires the global-argmax reductions "
-        "(_global_argmax_from_local_logits / _global_argmax_from_local_max) that "
-        "the fork's DFlashWorker exposed. They are unported for Phase 1, which "
-        "targets single-GPU (TP=1) draft. Run with tensor-parallel size 1."
-    )
 
 
 def assert_domino_server_args_supported(server_args, algo_name: str) -> None:
@@ -61,21 +53,11 @@ def assert_domino_server_args_supported(server_args, algo_name: str) -> None:
     so programmatic launches that bypass the speculative arg hook still fail
     fast instead of silently producing wrong output (P5 correctness gate).
     """
-    # ------------------------------------------------------------------
-    # TODO(P8-8B/TP): relax this guard when the TP>1 rollout lands.
-    # The Domino rollout's TP global-argmax reduction callbacks are unported
-    # (see _tp_argmax_not_implemented above); the DOMINOTREE builders also read
-    # the dense (unsharded) LM head. Both need work before TP>1 is safe.
-    # ------------------------------------------------------------------
-    tp_size = int(getattr(server_args, "tp_size", 1) or 1)
-    if tp_size != 1:
-        raise NotImplementedError(
-            f"{algo_name} does not support tensor parallelism yet "
-            f"(got --tp-size {tp_size}). The Domino rollout's TP global-argmax "
-            "reductions are unported and the tree builders assume a dense TP=1 "
-            "LM head. Run with --tp-size 1."
-        )
-
+    # TP>1 is supported: the Domino chain's global-argmax reduction callbacks are
+    # implemented (DominoWorkerV2._global_argmax_from_local_{logits,max}) and the
+    # DOMINOTREE tree build all-gathers a full-vocab, rank-replicated base-logits
+    # tensor per step (DominoTreeWorkerV2._tp_full_base_logits). The
+    # DOMINOTREE-specific guards below apply at every tensor-parallel size.
     if algo_name == "DOMINOTREE":
         page_size = int(getattr(server_args, "page_size", 1) or 1)
         if page_size != 1:
@@ -141,12 +123,18 @@ class DominoWorkerV2(DFlashWorkerV2):
 
         # Re-assert launch invariants in the scheduler subprocess (P5): the
         # handle_server_args guard runs in the main process only; programmatic
-        # launches may skip it. TODO(P8-8B/TP): relax the TP guard (see
-        # assert_domino_server_args_supported).
+        # launches may skip it. TP>1 is now supported (see the TP helpers on
+        # DominoWorkerV2 / DominoTreeWorkerV2); only the non-TP invariants remain.
         assert_domino_server_args_supported(self.server_args, self._algo_name)
 
         self.domino_helper: Optional[DFlashDominoHelper] = None
         self.domino_rollout: Optional[DFlashDominoRollout] = None
+
+        # Target ORG vocab size (full, unsharded). Under TP>1 the tree build
+        # slices the all-gathered full-vocab base logits to exactly this width.
+        self._target_vocab_size = int(
+            getattr(self.target_worker.model_runner.model_config, "vocab_size", 0) or 0
+        )
 
         projector_type = getattr(self.draft_model, "projector_type", None)
         if not is_dflash_domino_projector(projector_type):
@@ -159,17 +147,15 @@ class DominoWorkerV2(DFlashWorkerV2):
 
         self.domino_helper = DFlashDominoHelper(self.draft_model)
 
-        target_model_config = self.target_worker.model_runner.model_config
-        target_vocab_size = int(getattr(target_model_config, "vocab_size", 0) or 0)
-
         self.domino_rollout = DFlashDominoRollout(
             domino_helper=self.domino_helper,
             block_size=int(self.block_size),
-            target_vocab_size=target_vocab_size,
+            target_vocab_size=self._target_vocab_size,
             # TP>1 reduction callbacks are only invoked by the rollout's
-            # TP-eager path (tp_size != 1); TP=1 never calls them.
-            global_argmax_from_local_logits=_tp_argmax_not_implemented,
-            global_argmax_from_local_max=_tp_argmax_not_implemented,
+            # vocab-parallel fallback (when DFLASH_DOMINO_TP_REPLICATE_SCORER is
+            # disabled or auto-disabled by a memory check); TP=1 never calls them.
+            global_argmax_from_local_logits=self._global_argmax_from_local_logits,
+            global_argmax_from_local_max=self._global_argmax_from_local_max,
         )
         logger.info(
             "DominoWorkerV2 initialized Domino chain rollout "
@@ -232,6 +218,83 @@ class DominoWorkerV2(DFlashWorkerV2):
             self.draft_model_runner.forward = orig_draft_forward
             self._greedy_sample_from_vocab_parallel_head = orig_greedy
 
+    # -- TP>1 global-argmax reductions (chain vocab-parallel fallback) --------
+    #
+    # These implement the two callbacks the Domino chain rollout invokes ONLY on
+    # its vocab-parallel path (when the replicated scorer is off): each rank has
+    # scored its own vocab shard, so the globally-winning token must be selected
+    # across ranks before the next GRU step. Mirrors the upstream reference
+    # ``DFlashWorkerV2._greedy_sample_from_vocab_parallel_head``
+    # (dflash_worker_v2.py ~765-819): all-gather per-rank max VALUES + the
+    # per-rank winning GLOBAL token ids, argmax over the rank axis, then gather
+    # the winning ids. The all-gather + argmax are deterministic and identical on
+    # every rank, so all ranks pick the same token and the Domino GRU state stays
+    # in lockstep.
+
+    def _tp_global_argmax_reduce(
+        self, local_max: torch.Tensor, global_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """Given each rank's per-row local max value and the corresponding GLOBAL
+        token id, return the per-row globally-winning token id ([bs] int64),
+        identical on every rank."""
+        global_ids = global_ids.to(torch.int64)
+        tp_group = get_tp_group()
+        tp_size = int(tp_group.world_size)
+        if tp_size == 1:
+            return global_ids
+
+        local_max = local_max.contiguous()
+        global_ids = global_ids.contiguous()
+        n = int(local_max.shape[0])
+        # 1-D gather buffers, rank-major, then view(tp_size, n) -- exactly the
+        # reference idiom (dflash_worker_v2.py:804-819).
+        gathered_max = torch.empty(
+            (tp_size * n,), dtype=local_max.dtype, device=local_max.device
+        )
+        gathered_ids = torch.empty(
+            (tp_size * n,), dtype=global_ids.dtype, device=global_ids.device
+        )
+        tp_group.all_gather_into_tensor(gathered_max, local_max)
+        tp_group.all_gather_into_tensor(gathered_ids, global_ids)
+        gathered_max = gathered_max.view(tp_size, n)
+        gathered_ids = gathered_ids.view(tp_size, n)
+
+        best_rank = torch.argmax(gathered_max, dim=0)  # [n]
+        selected = torch.gather(gathered_ids, 0, best_rank.unsqueeze(0))  # [1, n]
+        return selected.view(-1).to(torch.int64)
+
+    def _global_argmax_from_local_logits(
+        self, *, local_logits, local_vocab_start, local_token_ids=None
+    ) -> torch.Tensor:
+        """TP global argmax from each rank's LOCAL logits.
+
+        ``local_logits`` is ``[bs, local_width]``. Without ``local_token_ids`` the
+        columns are contiguous local shard positions, so a local argmax + the
+        shard's ``local_vocab_start`` offset yields the global id. With
+        ``local_token_ids`` (``[bs, local_width]`` of GLOBAL ids, the candidate
+        path), the winning global id is gathered directly from that table. The
+        per-rank (value, global_id) pair is then reduced across the TP group.
+        """
+        local_max, local_arg = torch.max(local_logits, dim=-1)  # [bs], [bs]
+        if local_token_ids is None:
+            global_ids = local_arg.to(torch.int64) + int(local_vocab_start)
+        else:
+            global_ids = torch.gather(
+                local_token_ids, 1, local_arg.to(torch.int64).unsqueeze(1)
+            ).view(-1)
+        return self._tp_global_argmax_reduce(local_max, global_ids)
+
+    def _global_argmax_from_local_max(
+        self, *, local_max, global_ids
+    ) -> torch.Tensor:
+        """TP global argmax from precomputed per-rank max VALUES + GLOBAL ids.
+
+        Used on the fused-kernel path, where the local scorer already produced the
+        winning value and (via ``+ org_vocab_start`` at the call site) its global
+        token id; here we only reduce across the TP group.
+        """
+        return self._tp_global_argmax_reduce(local_max, global_ids)
+
 
 # ---------------------------------------------------------------------------
 # Phase 2: tree-verify (toy fixed tree)
@@ -286,9 +349,11 @@ class DominoTreeWorkerV2(DominoWorkerV2):
     verify only accepts argmax-matching tokens; at T>0 (P6) eagle_sample's
     tree_speculative_sampling_target_only is the distribution-preserving threshold
     sampler (draft stays greedy; only acceptance is temperature-aware). Constraints:
-    TP=1 only (the builder reads the dense LM head + runs a per-node GRU on the
-    host), page_size==1, non-mamba target, no compact-draft-cache window, no
-    rejection sampling (greedy draft produces no draft_probs). Anything else falls
+    page_size==1, non-mamba target, no compact-draft-cache window, no rejection
+    sampling (greedy draft produces no draft_probs). TP>1 IS supported: the tree
+    build all-gathers a full-vocab, rank-replicated base-logits tensor per step
+    (``_tp_full_base_logits``), so every rank builds the same tree and the
+    per-request host syncs need no cross-rank coordination. Anything else falls
     back to the lossless Domino chain.
 
     P4: the tree verify now runs under the decode CUDA graph (the DOMINOTREE
@@ -297,7 +362,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
     PORT_NOTES.md.
 
     P5 (correctness gate): unsupported configs FAIL FAST instead of running
-    silently (TP>1, page_size!=1, compact draft cache, Mamba/hybrid target at
+    silently (page_size!=1, compact draft cache, Mamba/hybrid target at
     server level; return_logprob / grammar per request), and any chain-verify
     FALLBACK on a cuda-graph server is forced EAGER (``_chain_fallback``): the
     P4b hook captures the target-verify graph WITH a ``custom_mask_buf``, but
@@ -352,12 +417,18 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             except ValueError:
                 return default
 
-        # P3 conditional best-first builder is the DEFAULT; DOMINOTREE_BUILDER=toy
-        # keeps the P2 fixed caterpillar reachable for A/B;
-        # DOMINOTREE_BUILDER=frontier selects the Option B batched frontier
-        # builder (tree/frontier.py) — same conditional scorer, zero host syncs,
-        # NOT yet GPU-validated, so it is opt-in until the §3 gates pass.
-        self.tree_builder = os.environ.get("DOMINOTREE_BUILDER", "conditional").strip()
+        # DEFAULT = the Option B batched frontier builder (tree/frontier.py): GPU-
+        # validated (commits 92a11a4 + e6fe5f0), zero host syncs, and with
+        # DOMINOTREE_FRONTIER_GRAPH on by default (frontier.py) it is the fastest,
+        # deployment-and-paper-headline config — so a bare `--speculative-algorithm
+        # DOMINOTREE` runs the best builder out of the box. DOMINOTREE_BUILDER
+        # overrides are kept for science/reproducibility + robustness, NOT for
+        # routine use: `conditional` = the P3 per-request best-first heap (the
+        # paper's Python-vs-GPU-native builder ablation, with DOMINOTREE_GPU_BUILDER
+        # toggling its CUDA-graph node expander); `toy` = the P2 fixed caterpillar.
+        # If the frontier builder fails to construct on a given GPU it falls back to
+        # the conditional builder automatically (_build_frontier_trees).
+        self.tree_builder = os.environ.get("DOMINOTREE_BUILDER", "frontier").strip()
         self.tree_node_topk = _env_int("DOMINOTREE_NODE_TOPK", 8)
         self.tree_corr_topm = _env_int("DOMINOTREE_CORR_TOPM", 64)
         self.tree_prefix_len = int(getattr(self.draft_model, "pure_draft_prefix_len", 1))
@@ -800,6 +871,92 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             depth.append(1)
         return tokens[:n], parent[:n], depth[:n]
 
+    def _tp_full_base_logits(self, ph_cast, lm_head, valid_vocab_size):
+        """FULL-VOCAB target base logits, replicated identically on every TP rank.
+
+        The tree builders consume ``base_logits`` as ``[..., vocab]`` marginals and
+        emit token ids by indexing that vocab axis. Under TP>1 ``lm_head.weight``
+        is only this rank's org-vocab SHARD, so a naive ``ph @ weight.T`` would
+        cover a partial vocab and produce wrong token ids. We instead all-gather
+        the per-rank shard LOGITS (one collective per tree build) into the full
+        org vocab, laid out as a direct padded-org concat, and slice to the target
+        org vocab. The result is identical on all ranks, so the entire downstream
+        per-request builder (and its ``.tolist()`` host syncs) runs rank-replicated
+        with no further cross-rank coordination.
+
+        This mirrors the shard-layout assumptions of
+        ``DFlashDominoRollout._get_domino_tp_full_lm_head_weight`` (all-gather the
+        first ``num_org_padded`` rows per rank, concatenate in rank order, slice to
+        the org vocab) but gathers the LOGITS rather than the WEIGHT, which is
+        cheaper and avoids the memory-fragile replicated-scorer weight path.
+        """
+        weight = lm_head.weight
+        tp_group = get_tp_group()
+        tp_size = int(tp_group.world_size)
+
+        # TP=1 (or an unsharded head): dense weight -> behave EXACTLY as before.
+        if tp_size == 1 or not hasattr(lm_head, "shard_indices"):
+            return torch.matmul(ph_cast, weight.T)
+
+        shard = lm_head.shard_indices
+        num_added = int(shard.num_added_elements)
+        if num_added != 0:
+            raise NotImplementedError(
+                "DOMINOTREE tree build does not support added-vocab lm_head shards "
+                f"under TP>1 (num_added_elements={num_added})."
+            )
+        num_org_padded = int(shard.num_org_elements_padded)
+        org_vocab_start = int(shard.org_vocab_start_index)
+        valid = int(valid_vocab_size)
+        if num_org_padded <= 0:
+            raise RuntimeError(
+                "DOMINOTREE tree build: lm_head shard has empty padded org vocab "
+                f"(num_org_elements_padded={num_org_padded})."
+            )
+        # Layout assumption (identical to _get_domino_tp_full_lm_head_weight): the
+        # target vocab is a DIRECT padded-org concat, i.e. rank r owns global org
+        # token ids [r*num_org_padded, ...). Gathering shards in rank order is only
+        # valid under this layout; otherwise token ids would be mislabeled.
+        expected_org_start = int(tp_group.rank_in_group) * num_org_padded
+        if org_vocab_start != expected_org_start:
+            raise RuntimeError(
+                "DOMINOTREE tree build requires a direct padded-org concat vocab "
+                f"shard layout: org_vocab_start={org_vocab_start}, "
+                f"expected={expected_org_start} (rank_in_group*num_org_padded)."
+            )
+        full_padded = tp_size * num_org_padded
+        if valid <= 0 or valid > full_padded:
+            raise RuntimeError(
+                "DOMINOTREE tree build: target vocab out of range vs padded org "
+                f"vocab: valid_vocab_size={valid}, full_padded={full_padded}."
+            )
+        if int(weight.shape[0]) < num_org_padded:
+            raise RuntimeError(
+                "DOMINOTREE tree build: lm_head shard smaller than padded org "
+                f"shard: weight_rows={int(weight.shape[0])}, "
+                f"num_org_padded={num_org_padded}."
+            )
+
+        # Local shard logits: [bs, k_draft, num_org_padded].
+        local_logits = torch.matmul(
+            ph_cast, weight[:num_org_padded].T
+        ).contiguous()
+        bs, k_draft, _ = local_logits.shape
+        # All-gather over the TP group (rank-major): [tp_size, bs, k_draft, npad].
+        gathered = torch.empty(
+            (tp_size, bs, k_draft, num_org_padded),
+            dtype=local_logits.dtype,
+            device=local_logits.device,
+        )
+        tp_group.all_gather_into_tensor(gathered, local_logits)
+        # Merge the rank axis with the local-vocab axis into the global vocab axis:
+        #   gathered[r, b, k, j] -> full[b, k, r*num_org_padded + j]
+        full = (
+            gathered.permute(1, 2, 0, 3)
+            .reshape(bs, k_draft, full_padded)
+        )
+        return full[..., :valid]
+
     def _build_conditional_trees(self, draft_hidden, verified, bs, n, device):
         """Build a per-request conditional tree; return (draft_tokens[bs,N], intra_mask[bs,N,N]).
 
@@ -837,9 +994,14 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         # a persistent buffer. Phase 1 (batch_builder_design.md §2A) reduces it
         # immediately to [bs,k_draft,corr_topm]-sized statics; Phase 0 only
         # batches the matmul.
-        weight = target_model.lm_head.weight  # [V, H] full at TP=1
+        weight = target_model.lm_head.weight  # [V,H] full at TP=1; vocab shard at TP>1
         ph_cast = ph_all.to(weight.dtype) if ph_all.dtype != weight.dtype else ph_all
-        base_logits_all = torch.matmul(ph_cast, weight.T)  # [bs, k_draft, V]
+        # TP=1: dense head -> ph_cast @ weight.T, unchanged. TP>1: all-gather the
+        # per-rank shard logits into a full-vocab, rank-replicated tensor so every
+        # rank builds the same tree (the crux of the TP port).
+        base_logits_all = self._tp_full_base_logits(
+            ph_cast, target_model.lm_head, self._target_vocab_size
+        )  # [bs, k_draft, V] (identical on every TP rank)
 
         # (3) ONE batched root-state GRU over the [bs] verified tokens (was bs
         # separate 1-token GRU calls). prefix_gru is batch_first, so
@@ -948,9 +1110,13 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         else:
             ph_all = draft_hidden[:, -(n - 1):, :]  # [bs, N-1, H]
 
-        weight = target_model.lm_head.weight  # [V, H] full at TP=1
+        weight = target_model.lm_head.weight  # [V,H] full at TP=1; vocab shard at TP>1
         ph_cast = ph_all.to(weight.dtype) if ph_all.dtype != weight.dtype else ph_all
-        base_logits_all = torch.matmul(ph_cast, weight.T)  # transient [bs, k_draft, V]
+        # TP>1: all-gather the per-rank shard logits into a full-vocab,
+        # rank-replicated tensor (identical on every rank). TP=1 is unchanged.
+        base_logits_all = self._tp_full_base_logits(
+            ph_cast, target_model.lm_head, self._target_vocab_size
+        )  # transient [bs, k_draft, V]
 
         embed_tokens = target_model.get_input_embeddings()
         root_emb_all = embed_tokens(verified.view(bs, 1).to(torch.long))  # [bs,1,E]

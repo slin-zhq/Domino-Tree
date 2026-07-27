@@ -81,10 +81,11 @@ def _build_spec_class(algo_name: str = "DOMINO"):
             _handle_dflash(server_args)
 
             # P5 fail-fast guards (main process, before any model load):
-            # TP>1 for both algos; page_size!=1 and the compact draft cache
-            # additionally for DOMINOTREE. Re-checked in the worker __init__
-            # (scheduler subprocess). Mamba/hybrid targets are guarded in the
-            # worker __init__ only (needs the live attention backend).
+            # DOMINOTREE-specific configs (page_size!=1, compact draft cache,
+            # rejection sampling, non-default accept thresholds, custom logit
+            # processor). Tensor parallelism is supported at any size. Re-checked
+            # in the worker __init__ (scheduler subprocess). Mamba/hybrid targets
+            # are guarded in the worker __init__ only (needs the live backend).
             assert_domino_server_args_supported(server_args, algo_name)
 
             # Phase 1 runs synchronously (supports_overlap=False). The Domino

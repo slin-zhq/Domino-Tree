@@ -58,21 +58,33 @@ tokens per round, per-round stage timings, and a short output signature for loss
 checks. Methods run through a warmup prompt before timing (matching the DDTree/CaDDTree
 benchmark convention), so measured prompts are warm from the start.
 
-## Serving on SGLang (experimental)
+## Serving on SGLang
 
-DominoTree can also run inside the **SGLang** production serving engine — not just the
-single-stream research harness above — as an out-of-tree speculative-decoding plugin (the
-package under `sglang_dominotree/`). It registers a `DOMINOTREE` speculative algorithm on
-**stock upstream SGLang** and reuses SGLang's EAGLE tree-verify; it vendors Domino's
-official GRU-correction head (copied verbatim, not reimplemented — see
+DominoTree runs inside the **SGLang** production serving engine — not just the single-stream
+research harness above — as an out-of-tree speculative-decoding plugin (the package under
+`sglang_dominotree/`). It registers a `DOMINOTREE` speculative algorithm on **stock upstream
+SGLang** and reuses SGLang's EAGLE tree-verify; it vendors Domino's official GRU-correction
+head (copied verbatim, not reimplemented — see
 [`sglang_dominotree/PROVENANCE.md`](sglang_dominotree/PROVENANCE.md) for the manifest and a
 one-command proof that the copy is byte-identical to the official fork) and adds our
-conditional best-first tree builder with a GPU-native CUDA-graph builder.
+conditional best-first tree builder.
 
-> **Status:** on the `sglang-integration` branch; validated on an RTX 5080 (Qwen3-4B pair,
-> TP=1) at temperature 0 — lossless, ~1.9× faster tree construction via the GPU-native
-> builder, and it runs under SGLang's decode CUDA graphs. See
-> `docs/domino_tree_sglang_integration/` (start with `EXPLAINER_noob_friendly.md`).
+**The default config is the zero-sync frontier builder with CUDA-graph capture** — the
+fastest configuration and the one the paper reports. No env vars are needed to get it: a bare
+`--speculative-algorithm DOMINOTREE` uses it. It is lossless by construction (the target
+verifier is unchanged) and runs under SGLang's decode CUDA graphs, at any temperature.
+
+> **Status:** on the `sglang-integration` branch. GPU-validated on RTX 5080s at **T=0 and
+> T>0** — lossless, and the highest accepted length of every method we evaluated, in every
+> cell we measured. Tensor parallelism (`--tp-size > 1`) is supported and is what the
+> Qwen3-8B results use.
+
+**Reproducing the paper's serving results.** [`sglang_dominotree/benchmarks/`](sglang_dominotree/benchmarks/)
+holds all three serving benchmarks — single-request (`bs1/`), goodput under concurrency
+(`concurrency/`), and long context on HELMET (`helmet/`) — each comparing DominoTree with
+AR, DFlash, EAGLE-3, and the Domino chain under identical serving flags. Start at
+[`benchmarks/README.md`](sglang_dominotree/benchmarks/README.md); it also explains the one
+thing that is easy to misread under concurrency, the per-method **admission cap**.
 
 **Install** (needs a recent upstream SGLang with the `sglang.srt.plugins` entry point +
 DFLASH-v2; validated against commit `1adb53f14`):
@@ -81,7 +93,7 @@ DFLASH-v2; validated against commit `1adb53f14`):
 pip install -e sglang_dominotree      # registers the `dominotree` sglang.srt.plugins entry point
 ```
 
-**Serve** DominoTree on the Domino drafter:
+**Serve** DominoTree on the Domino drafter (the best config is the default — no env knobs needed):
 
 ```bash
 SGLANG_PLUGINS=dominotree \
@@ -93,12 +105,20 @@ python -m sglang.launch_server \
   --tp-size 1 --trust-remote-code --mem-fraction-static 0.7 --port 30000
 ```
 
-`SGLANG_PLUGINS=dominotree` whitelists the plugin; the server then serves DominoTree
-speculative decoding on SGLang's OpenAI-compatible / `/generate` endpoints. Env knobs:
-`DOMINOTREE_NODE_TOPK` (8), `DOMINOTREE_CORR_TOPM` (64), `DOMINOTREE_GPU_BUILDER`
-(1 = GPU-native CUDA-graph builder, 0 = pure-Python). For the plain **Domino chain** on
-SGLang, use `--speculative-algorithm DOMINO`. Validated path: T=0 greedy (T>0 falls back to
-the Domino chain), TP=1, page-size 1, non-Mamba target.
+`SGLANG_PLUGINS=dominotree` whitelists the plugin; the server then serves DominoTree on
+SGLang's OpenAI-compatible / `/generate` endpoints, at any temperature. For the plain
+**Domino chain** baseline on SGLang, use `--speculative-algorithm DOMINO`. For a larger
+target, raise `--tp-size` (e.g. `--tp-size 2` for Qwen3-8B on two GPUs).
+
+**Config knobs** — the defaults are the best config, so routine serving needs none; these are
+for science / ablation / reproducibility:
+`DOMINOTREE_BUILDER` (`frontier` default; `conditional` = the per-request best-first heap used
+in the paper's Python-vs-GPU-native builder ablation, `toy` = a fixed caterpillar),
+`DOMINOTREE_FRONTIER_GRAPH` (`1` default = capture the frontier builder itself in a CUDA
+graph), `DOMINOTREE_GPU_BUILDER` (`1` default; the CUDA-graph node expander for the
+`conditional` builder), `DOMINOTREE_NODE_TOPK` (8), `DOMINOTREE_CORR_TOPM` (64). The plugin
+requires page-size 1 and a non-Mamba target; unsupported server configs fail fast rather than
+run silently-wrong.
 
 ## Baselines
 

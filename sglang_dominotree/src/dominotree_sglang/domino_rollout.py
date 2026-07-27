@@ -453,15 +453,35 @@ class DFlashDominoRollout:
         if mode == "auto" and local_lm_head_weight.device.type == "cuda":
             free_bytes, _ = torch.cuda.mem_get_info(local_lm_head_weight.device)
             cushion = _DOMINO_TP_SCORER_CUSHION_MB
-            if int(free_bytes) < required_bytes + cushion * 1024 * 1024:
+            local_enough = int(free_bytes) >= required_bytes + cushion * 1024 * 1024
+            # TP CONSISTENCY (must decide identically on every rank): the
+            # replicated-scorer decision selects whether the per-step rollout takes
+            # the collective (vocab-parallel) argmax path. torch.cuda.mem_get_info is
+            # per-GPU and can differ across ranks, so a naive per-rank check lets one
+            # rank keep the replicated scorer (no collective, argmax) while another
+            # falls back to the vocab-parallel path (all_gather) -> the second rank
+            # blocks on an all_gather the first never joins -> NCCL hang. Reduce the
+            # decision to a group-wide AND: replicate only if EVERY rank has enough
+            # memory; otherwise ALL ranks fall back together. This all_reduce is
+            # reached by every rank (the mode/device gate above is rank-uniform).
+            flag = torch.tensor(
+                [1 if local_enough else 0],
+                dtype=torch.int32,
+                device=local_lm_head_weight.device,
+            )
+            flag = tp_group.all_reduce(flag)
+            all_enough = int(flag.item()) == tp_size
+            if not all_enough:
                 if not getattr(self, "_domino_tp_replicate_scorer_mem_warned", False):
                     logger.warning(
-                        "DFLASH TP replicated scorer disabled by auto memory check: "
-                        "need %.2f GiB + %d MiB cushion, free %.2f GiB. "
-                        "Set DFLASH_DOMINO_TP_REPLICATE_SCORER=1 to force or 0 to silence.",
+                        "DFLASH TP replicated scorer disabled by auto memory check "
+                        "(group-wide AND): need %.2f GiB + %d MiB cushion, this rank "
+                        "free %.2f GiB (local_enough=%s). Set "
+                        "DFLASH_DOMINO_TP_REPLICATE_SCORER=1 to force or 0 to silence.",
                         required_bytes / (1024**3),
                         cushion,
                         int(free_bytes) / (1024**3),
+                        local_enough,
                     )
                     self._domino_tp_replicate_scorer_mem_warned = True
                 return None
