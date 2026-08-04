@@ -1,7 +1,15 @@
 # SGLang serving benchmarks
 
 Reproduction scripts for the paper's SGLang serving results. Three benchmarks, five
-methods each:
+methods each.
+
+> **You do not need a GPU to check the published numbers.** The raw output of every run
+> reported in the paper ships in [`results/serving/`](../../results/serving/), together
+> with a one-command audit that recomputes all 88 published serving cells from that raw
+> data and diffs them against the paper:
+> `python3 results/serving/verify_published_numbers.py`.
+> Use the scripts below when you want to **re-measure** on your own hardware; use
+> `results/serving/` when you want to **check our arithmetic**.
 
 | Directory | Measures | Paper |
 |---|---|---|

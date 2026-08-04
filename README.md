@@ -9,6 +9,61 @@
   <a href="https://arxiv.org/abs/2607.08642">arXiv:2607.08642</a>
 </p>
 
+DominoTree scores DDTree's best-first heap with node scores a factorized formulation
+cannot express, by re-running Domino's GRU correction along each candidate's specific
+root-to-node path. It is **training-free** on the released Domino checkpoint and
+**lossless by construction** — the target verifier is unchanged, so only tokens the
+target itself would have emitted are ever committed.
+
+## Two ways to run it
+
+The repository supports both settings the paper reports, as first-class paths. Pick the
+one that matches what you want to measure.
+
+| | **A. HF research harness** | **B. SGLang serving** |
+|---|---|---|
+| **Reproduces** | Table 1 — offline single-stream, 8 datasets × 3 temperatures, Qwen3-4B + 8B | The serving tables — bs=1, concurrency goodput, HELMET long context |
+| **Compares against** | DFlash, DDTree, CaDDTree, released Domino decoder | AR, DFlash, EAGLE-3, Domino chain — all in one engine, identical flags |
+| **Entry point** | [`run_benchmark.sh`](run_benchmark.sh) → [`benchmark.py`](benchmark.py) | [`sglang_dominotree/`](sglang_dominotree/) plugin → [`benchmarks/`](sglang_dominotree/benchmarks/) |
+| **Engine** | plain PyTorch / HF, one request at a time | stock upstream SGLang, out-of-tree plugin |
+| **Install** | `pip install -r requirements.txt` | `pip install -e sglang_dominotree` |
+| **Use it when** | you want the algorithm measured without engine effects | you want production behaviour: batching, paged KV, CUDA graphs, long prompts |
+
+Both run the **same method**. The harness isolates the algorithm; the serving path shows
+what survives inside a heavily optimized engine (less, and we say so — a stronger
+baseline shrinks the margin).
+
+## Checking the published numbers without a GPU
+
+You do not need hardware, model weights, or the paper's LaTeX to audit the results. Every
+raw measurement behind the serving tables ships in [`results/serving/`](results/serving/),
+with a one-command audit that recomputes **all 88 published serving cells** from that raw
+data and diffs them against the values printed in the paper:
+
+```bash
+python3 results/serving/verify_published_numbers.py   # stdlib only — no GPU, no weights
+```
+
+Expected: `ALL CELLS REPRODUCE FROM RAW DATA.` It also prints each run's admission cap,
+read out of that run's own server-status file, so the fairness of the concurrency
+comparison is checkable rather than asserted. The offline tables regenerate the same way
+from `results/raw/` — see [Results](#results).
+
+## Repository layout
+
+```
+benchmark.py, dominotree.py, dominotree_gpu.py   path A: the HF research harness
+  run_benchmark.sh, run_pipeline.sh              …its drivers
+  make_latex_table.py                            …raw JSONL -> the paper's tables
+sglang_dominotree/                               path B: the SGLang plugin
+  src/dominotree_sglang/                         …algorithm registration + tree builder
+  benchmarks/{bs1,concurrency,helmet}/           …the three serving benchmarks
+  PROVENANCE.md, verify_vendored_head.py         …vendored-code manifest + copy proof
+results/raw/, results/tables_gpunative/          path A raw data + derived tables
+results/serving/                                 path B raw data + the no-GPU audit
+demo/                                            side-by-side record-then-replay demo
+```
+
 ## Prerequisites / Getting the Domino drafter
 
 DominoTree vendors no Domino code and no drafter weights. Clone the official
@@ -27,7 +82,9 @@ Download the released checkpoints from Hugging Face:
 Pass the Domino code directory at runtime with `--domino-code /path/to/Domino/code`.
 The helper script reads the same path from `DOMINO_CODE`.
 
-## Setup
+## Path A — HF research harness
+
+### Setup
 
 This codebase is intended for a CUDA-enabled PyTorch environment. Install a CUDA-compatible
 PyTorch build first if your environment does not already provide one.
@@ -44,7 +101,7 @@ export MODEL_PATH=/path/to/Qwen3-4B
 export DRAFT_PATH=/path/to/Qwen3-4B-Domino-b16
 ```
 
-## Run
+### Run
 
 The headline public configuration is `dominotree@16` with `--corr-topm 64`.
 
@@ -58,7 +115,7 @@ tokens per round, per-round stage timings, and a short output signature for loss
 checks. Methods run through a warmup prompt before timing (matching the DDTree/CaDDTree
 benchmark convention), so measured prompts are warm from the start.
 
-## Serving on SGLang
+## Path B — SGLang serving
 
 DominoTree runs inside the **SGLang** production serving engine — not just the single-stream
 research harness above — as an out-of-tree speculative-decoding plugin (the package under
@@ -183,6 +240,18 @@ table/figure is rebuilt from the shipped raw JSONLs by `make_latex_table.py`.
   ablation (Cond@16 vs Marg@16, matched builder).
 - `results/raw/8b/`: the Qwen3-8B raw data in the same layout (`dominotree/`, `baseline_ddtree_caddtree/`,
   `domino_official/qwen3-8b/`).
+- **`results/serving/`**: the **SGLang serving** raw data — all three axes (single-request bs=1,
+  concurrency goodput, HELMET long context), both model sizes, all five methods, including the
+  per-prompt sidecars the paired-bootstrap CIs are computed from. It ships its own
+  [`README.md`](results/serving/README.md) mapping each file to the table it backs, a
+  `MANIFEST.sha256`, and a one-command audit that recomputes **all 88 published serving cells**
+  from the raw JSONL and diffs them against the values printed in the paper:
+
+  ```bash
+  python3 results/serving/verify_published_numbers.py   # stdlib only; no GPU, no weights
+  ```
+
+  Expected: `ALL CELLS REPRODUCE FROM RAW DATA.`
 
 Regenerate the tables:
 
