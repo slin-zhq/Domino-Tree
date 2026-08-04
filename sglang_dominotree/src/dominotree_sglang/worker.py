@@ -188,7 +188,14 @@ class DominoWorkerV2(DFlashWorkerV2):
             return super().forward_batch_generation(model_worker_batch, on_publish)
 
         spec_info = getattr(model_worker_batch, "spec_info", None)
-        verified_id = getattr(spec_info, "verified_id", None)
+        # Version-tolerant: upstream renamed verified_id -> bonus_tokens. Reading
+        # only the old name here silently disabled the Domino correction on newer
+        # SGLang (see the loud warning in the fallback below).
+        verified_id = None
+        if spec_info is not None:
+            verified_id = getattr(spec_info, "bonus_tokens", None)
+            if verified_id is None:
+                verified_id = getattr(spec_info, "verified_id", None)
 
         captured: dict = {}
         orig_draft_forward = self.draft_model_runner.forward
@@ -209,7 +216,25 @@ class DominoWorkerV2(DFlashWorkerV2):
         def _domino_sample_draft_block(*, hidden_states, lm_head, chunk_size: int = 256):
             draft_hidden = captured.get("draft_hidden")
             if draft_hidden is None or verified_id is None:
-                # Defensive: no captured hidden / verified id -> plain greedy.
+                # Fall back to plain greedy drafting. This is a CORRECTNESS-SAFE but
+                # QUALITY-DESTROYING path: without the GRU correction the DFlash head
+                # runs on Domino weights and acceptance collapses to ~1.0 -- i.e. the
+                # speculation stops paying for itself while still costing a draft pass.
+                #
+                # It must never be silent again. It was: upstream renamed
+                # verified_id -> bonus_tokens, this lookup started returning None, and
+                # DOMINO quietly dropped from tau 4.0 to 1.008 with no error anywhere.
+                if not getattr(self, "_warned_greedy_fallback", False):
+                    self._warned_greedy_fallback = True
+                    logger.error(
+                        "DOMINO: falling back to PLAIN GREEDY drafting -- the Domino "
+                        "GRU correction is NOT being applied (draft_hidden=%s, "
+                        "verified_id/bonus_tokens=%s). Acceptance length will collapse "
+                        "to ~1.0. This usually means the upstream draft-input contract "
+                        "changed again; check DFlashDraftInputV2's field names.",
+                        "missing" if draft_hidden is None else "ok",
+                        "missing" if verified_id is None else "ok",
+                    )
                 return orig_greedy(
                     hidden_states=hidden_states, lm_head=lm_head, chunk_size=chunk_size
                 )
