@@ -45,6 +45,129 @@ from .domino_rollout import DFlashDominoRollout
 logger = logging.getLogger(__name__)
 
 
+# Every upstream attribute this plugin reads through a defensive `getattr(..., default)`.
+# A rename upstream makes such a read return the DEFAULT instead of raising, which is how
+# this plugin has already been bitten three times in one upgrade:
+#   * spec_info.verified_id      -> bonus_tokens      (correction silently skipped, tau 4.0 -> 1.0)
+#   * model_runner.hybrid_gdn_config -> mambaish_config()  (hybrid guard silently stopped firing)
+#   * DFlashDraftInputV2.verify_done  removed          (constructor kwarg silently wrong)
+# The pattern is always the same: a *safety* or *dispatch* read degrades to a plausible
+# default and nothing crashes. This check turns that class of failure into a loud startup
+# error instead of a silent behaviour change.
+#
+# Format: (getter, attribute, why it matters). `getter` takes the worker and returns the
+# object to inspect, or None if that object is not available at check time (then skipped).
+_UPSTREAM_CONTRACT = [
+    ("server_args", "speculative_use_rejection_sampling",
+     "losslessness guard: rejection sampling is lossy for a greedy draft"),
+    ("server_args", "enable_custom_logit_processor",
+     "losslessness guard: custom logit processors bypass the verifier"),
+    ("server_args", "speculative_draft_window_size",
+     "compact draft-cache guard"),
+]
+
+# LATE-BOUND attributes: assigned after the draft worker is constructed (e.g.
+# decode_cuda_graph_runner is set during target CUDA-graph capture,
+# model_runner.py:929). hasattr() at init would be False even though nothing was
+# renamed -- checking them here would fail-closed on a healthy build, which is
+# exactly what happened the first time this check ran. They are verified at their
+# point of use instead; see _require_late_bound below.
+
+
+def _assert_upstream_contract(worker) -> None:
+    """Fail loudly if an upstream attribute we read defensively has disappeared."""
+    resolve = {
+        "server_args": lambda w: getattr(
+            getattr(getattr(w, "target_worker", None), "model_runner", None),
+            "server_args", None),
+        "target_model_runner": lambda w: getattr(
+            getattr(w, "target_worker", None), "model_runner", None),
+    }
+    missing = []
+    for holder, attr, why in _UPSTREAM_CONTRACT:
+        obj = resolve[holder](worker)
+        if obj is None:
+            continue  # not constructed yet on this build; not evidence of a rename
+        if not hasattr(obj, attr):
+            missing.append(f"  {holder}.{attr}  --  {why}")
+    if missing:
+        raise RuntimeError(
+            "DOMINOTREE: the upstream SGLang contract changed. These attributes are "
+            "read defensively by this plugin and no longer exist, so the reads would "
+            "silently return their defaults and the associated guard/dispatch would "
+            "stop working:\n" + "\n".join(missing) +
+            "\nRefusing to start rather than run with a silently disabled guard."
+        )
+
+
+
+def _require_late_bound(obj, attr, why):
+    """Read a late-bound upstream attribute, distinguishing ABSENT from None.
+
+    `getattr(obj, attr, None)` collapses two very different cases: the attribute
+    exists and is legitimately None (e.g. CUDA graphs disabled), or the attribute
+    is GONE because upstream renamed it -- in which case the guard that depends on
+    it silently stops working. hasattr() separates them.
+    """
+    if not hasattr(obj, attr):
+        logger.error(
+            "DOMINOTREE: %s.%s no longer exists on this SGLang build. %s. The "
+            "associated guard is now INACTIVE -- treat any results from this run "
+            "as untrusted.",
+            type(obj).__name__, attr, why,
+        )
+        return None
+    return getattr(obj, attr)
+
+
+def _detect_mamba_target(target_mr):
+    """Is the TARGET a Mamba / hybrid-linear-attention model?
+
+    Returns ``(is_hybrid, detector_name)``. ``detector_name is None`` means NO
+    detector could be evaluated -- the caller must then refuse to launch rather
+    than assume "not hybrid".
+
+    Why this is more than a getattr. Our original check read
+    ``model_runner.hybrid_gdn_config`` / ``.mamba2_config``. Current upstream
+    removed both from ModelRunner and exposes the same information as a function,
+    ``sglang.srt.configs.hybrid_arch.mambaish_config(model_config)``. A plain
+    ``getattr(..., None)`` therefore returns None on new SGLang and the guard
+    silently STOPS FIRING -- the exact failure mode it exists to prevent, and the
+    third instance in this plugin of "defensive getattr silently absorbs an
+    upstream rename". Detectors are tried newest-first and the one that answered
+    is reported so the log says how we decided.
+    """
+    # 1) current upstream: a function over the model config
+    try:
+        from sglang.srt.configs.hybrid_arch import mambaish_config
+
+        mc = getattr(target_mr, "model_config", None)
+        if mc is not None:
+            return mambaish_config(mc) is not None, "hybrid_arch.mambaish_config"
+    except Exception:
+        pass
+    # 2) some builds cache it on the KV-cache configurator / runner
+    for attr in ("mambaish_config", "hybrid_gdn_config", "mamba2_config"):
+        try:
+            if hasattr(target_mr, attr):
+                return getattr(target_mr, attr) is not None, f"model_runner.{attr}"
+        except Exception:
+            pass
+    # 3) last resort: the attention backend grew the mamba commit hook. Only
+    #    meaningful once the backend exists (it does not at draft-worker init on
+    #    every build), so absence here is NOT evidence of "not hybrid".
+    try:
+        backend = getattr(target_mr, "attn_backend", None)
+        if backend is not None:
+            return (
+                hasattr(backend, "update_mamba_state_after_mtp_verify"),
+                "attn_backend.update_mamba_state_after_mtp_verify",
+            )
+    except Exception:
+        pass
+    return False, None
+
+
 def _draft_bonus_tokens(draft_input):
     """The previous round's accepted/bonus token(s), across SGLang versions.
 
@@ -437,18 +560,29 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         # AttributeErrors on the pinned build. Best-effort + fully defensive: a
         # detection failure must never crash init for the common non-Mamba case.
         target_mr = self.target_worker.model_runner
-        try:
-            is_mamba_target = (
-                getattr(target_mr, "hybrid_gdn_config", None) is not None
-                or getattr(target_mr, "mamba2_config", None) is not None
+        is_mamba_target, detect_via = _detect_mamba_target(target_mr)
+        if detect_via is None:
+            # We could not evaluate ANY known detector. Refusing to launch beats
+            # running a hybrid target unguarded: this guard exists precisely
+            # because the failure it prevents is silent state corruption, not a
+            # crash. (Historically this block used
+            # `except Exception: is_mamba_target = False`, i.e. it failed OPEN.)
+            raise RuntimeError(
+                "DOMINOTREE cannot determine whether the target is a Mamba/hybrid "
+                "model: none of the known detectors are available on this SGLang "
+                "build (configs.hybrid_arch.mambaish_config, model_runner."
+                "hybrid_gdn_config / .mamba2_config, or the attention backend's "
+                "update_mamba_state_after_mtp_verify hook). Refusing to launch "
+                "rather than risk running a hybrid target unguarded -- accepted-path "
+                "recurrent states would silently never be committed. Please file "
+                "this with the SGLang version you are running."
             )
-            backend = getattr(target_mr, "attn_backend", None)
-            if backend is not None and hasattr(
-                backend, "update_mamba_state_after_mtp_verify"
-            ):
-                is_mamba_target = True
-        except Exception:  # detection is best-effort; never break launch
-            is_mamba_target = False
+        logger.info(
+            "DOMINOTREE hybrid-target detection: %s (via %s)",
+            "HYBRID" if is_mamba_target else "not hybrid",
+            detect_via,
+        )
+        _assert_upstream_contract(self)
         if is_mamba_target:
             raise NotImplementedError(
                 "DOMINOTREE does not support Mamba/hybrid target models: the "
@@ -646,7 +780,12 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             or mode.is_idle()
         )
         target_model_runner = self.target_worker.model_runner
-        graph_runner = getattr(target_model_runner, "decode_cuda_graph_runner", None)
+        graph_runner = _require_late_bound(
+            target_model_runner,
+            "decode_cuda_graph_runner",
+            "the chain fallback must force EAGER, or a graph replay reuses a stale "
+            "custom mask and commits the wrong tokens",
+        )
         if not reaches_chain_verify or graph_runner is None:
             return super().forward_batch_generation(model_worker_batch, on_publish)
 
