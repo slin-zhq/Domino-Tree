@@ -62,7 +62,83 @@ SHIM_MAP = {
         "from sglang.srt.speculative.domino_kernels import (",
 }
 
+# The COMPLETE set of FUNCTIONAL edits to the copied files. Unlike SHIM_MAP (which
+# only re-points import paths and changes no behaviour), an entry here changes what
+# the code DOES, so each one must justify itself. The proof works by reverting these
+# blocks back to the official text and then requiring an exact match -- so a declared
+# patch is accounted for, while any *undeclared* drift still fails the check.
+#
+# Format: basename -> list of (our_code_lines, official_code_lines, rationale).
+# Lines are whitespace-stripped code lines, in order, as compared by code_lines().
+PATCH_MAP = {
+    "domino_rollout.py": [
+        (
+            (
+                "local_enough = int(free_bytes) >= required_bytes + cushion * 1024 * 1024",
+                "flag = torch.tensor(",
+                "[1 if local_enough else 0],",
+                "dtype=torch.int32,",
+                "device=local_lm_head_weight.device,",
+                ")",
+                "flag = tp_group.all_reduce(flag)",
+                "all_enough = int(flag.item()) == tp_size",
+                "if not all_enough:",
+            ),
+            ("if int(free_bytes) < required_bytes + cushion * 1024 * 1024:",),
+            "TP>1 collective safety: the upstream code decides whether to use the "
+            "replicated scorer from each rank's OWN free memory (torch.cuda.mem_get_info). "
+            "Ranks can disagree, and then some ranks enter a collective the others skip, "
+            "which hangs the server. We all-reduce the decision so every rank takes the "
+            "same branch. Required for Qwen3-8B at --tp-size 2; a no-op at TP=1.",
+        ),
+        (
+            (
+                '"DFLASH TP replicated scorer disabled by auto memory check "',
+                '"(group-wide AND): need %.2f GiB + %d MiB cushion, this rank "',
+                '"free %.2f GiB (local_enough=%s). Set "',
+                '"DFLASH_DOMINO_TP_REPLICATE_SCORER=1 to force or 0 to silence.",',
+            ),
+            (
+                '"DFLASH TP replicated scorer disabled by auto memory check: "',
+                '"need %.2f GiB + %d MiB cushion, free %.2f GiB. "',
+                '"Set DFLASH_DOMINO_TP_REPLICATE_SCORER=1 to force or 0 to silence.",',
+            ),
+            "Log text for the patch above: says the decision is a group-wide AND and "
+            "reports this rank's own verdict. Message only.",
+        ),
+        (
+            ("local_enough,",),
+            (),
+            "Log argument for the reworded message above. Message only.",
+        ),
+    ],
+}
+
 PKG_DIR = Path(__file__).resolve().parent / "src" / "dominotree_sglang"
+
+
+def revert_patches(name: str, our_code: list[str]) -> tuple[list[str], list[str]]:
+    """Undo the declared functional patches, returning (reverted_lines, errors).
+
+    Each declared patch must appear EXACTLY ONCE. Missing means the declaration has
+    gone stale (the code moved on without PROVENANCE being updated); more than once
+    means the declaration is too loose to be a proof. Both are failures.
+    """
+    errors: list[str] = []
+    for ours_block, official_block, _why in PATCH_MAP.get(name, []):
+        n, hits = len(ours_block), []
+        for i in range(len(our_code) - n + 1):
+            if tuple(our_code[i:i + n]) == ours_block:
+                hits.append(i)
+        if len(hits) != 1:
+            errors.append(
+                f"declared patch matched {len(hits)} times (expected exactly 1): "
+                f"{ours_block[0][:70]!r}"
+            )
+            continue
+        i = hits[0]
+        our_code = our_code[:i] + list(official_block) + our_code[i + n:]
+    return our_code, errors
 
 
 def official_source(domino_repo: Path, upstream_path: str) -> str:
@@ -103,12 +179,13 @@ def check_file(name: str, official: str, ours: str) -> dict:
     off_lines = official.splitlines()
     our_lines = ours.splitlines()
 
-    # (1) hard gate: every CODE line identical after re-pointing the shims.
+    # (1) hard gate: every CODE line identical after re-pointing the shims AND
+    #     reverting the declared functional patches. Anything else is drift.
     off_code = code_lines(official)
-    our_code = code_lines(ours)
+    our_code, patch_errors = revert_patches(name, code_lines(ours))
     off_sha = hashlib.sha256("\n".join(off_code).encode()).hexdigest()
     our_sha = hashlib.sha256("\n".join(our_code).encode()).hexdigest()
-    code_match = off_sha == our_sha
+    code_match = off_sha == our_sha and not patch_errors
 
     # (2) any relative import in ours must be a documented shim.
     undocumented = [
@@ -121,6 +198,7 @@ def check_file(name: str, official: str, ours: str) -> dict:
     shims_used = sum(1 for ln in our_lines if ln.strip() in SHIM_MAP)
 
     ok = code_match and not undocumented
+    patches = PATCH_MAP.get(name, [])
     return {
         "file": name,
         "official_lines": len(off_lines),
@@ -131,7 +209,11 @@ def check_file(name: str, official: str, ours: str) -> dict:
         "shims_repointed": shims_used,
         "extra_noncode_lines": extra_comments,
         "undocumented_relative_imports": undocumented,
-        "verdict": "VERBATIM" if ok else "DRIFT",
+        "declared_patches": [w for _o, _f, w in patches],
+        "declared_patch_errors": patch_errors,
+        # VERBATIM = identical modulo import re-points only.
+        # VERBATIM+PATCHED = also carries the declared functional patches above.
+        "verdict": ("VERBATIM+PATCHED" if patches else "VERBATIM") if ok else "DRIFT",
         "ok": ok,
     }
 
@@ -177,8 +259,14 @@ def main() -> int:
             f"+{r['extra_noncode_lines']} comment/blank line(s); "
             f"{r['shims_repointed']} import shim(s)"
         )
+        if r["declared_patches"]:
+            detail += f"; {len(r['declared_patches'])} declared patch(es)"
         print(f"  {flag}{name:20s} official={r['official_lines']:>4} "
               f"ours={r['our_lines']:>4}  {detail}")
+        for why in r["declared_patches"]:
+            print(f"       PATCH: {why}")
+        for err in r["declared_patch_errors"]:
+            print(f"       STALE DECLARATION: {err}")
         if r["undocumented_relative_imports"]:
             for imp in r["undocumented_relative_imports"]:
                 print(f"       UNDOCUMENTED relative import: {imp}")
@@ -198,9 +286,17 @@ def main() -> int:
 
     print()
     if all_ok:
-        print("PASS: the vendored Domino head is byte-identical to the official "
-              f"fork @ {OFFICIAL_COMMIT[:10]},\n      modulo the enumerated import "
-              "shims. Not a reimplementation.")
+        n_patch = sum(len(r["declared_patches"]) for r in results)
+        modulo = "the enumerated import shims"
+        if n_patch:
+            modulo += f" and the {n_patch} enumerated functional patch(es) listed above"
+        print(f"PASS: the vendored Domino head is byte-identical to the official "
+              f"fork @ {OFFICIAL_COMMIT[:10]},\n      modulo {modulo}. "
+              "Not a reimplementation.")
+        if n_patch:
+            print("      (Every functional patch is declared in PATCH_MAP and reverted "
+                  "before\n       hashing, so any UNDECLARED change still fails this "
+                  "check.)")
         return 0
     print("FAIL: a vendored head file has drifted from the official source "
           "(see !! rows above).")
