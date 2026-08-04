@@ -1,3 +1,25 @@
+# Copyright 2023-2024 SGLang Team
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ---------------------------------------------------------------------------
+# VENDORED FILE -- copied verbatim from the official Domino SGLang fork
+#   github.com/jianuo-huang/Domino @ sglang-feat/dflash-domino
+#   commit e0d78707a089780ae3b0a23967a1de450818c42b
+# That tree is a fork of SGLang and carries SGLang's Apache-2.0 LICENSE, so this
+# file is Apache-2.0 -- NOT the MIT license covering the rest of this repository.
+# MODIFICATIONS (Apache-2.0 section 4b): import paths only, re-pointed from
+# sglang.srt.speculative.* into this package. See PROVENANCE.md for the exhaustive
+# diff and verify_vendored_head.py for a mechanical verbatim-copy proof.
+# ---------------------------------------------------------------------------
 from __future__ import annotations
 
 import torch

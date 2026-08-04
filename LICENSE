@@ -19,3 +19,20 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+-------------------------------------------------------------------------------
+THIRD-PARTY CODE
+
+This repository is MIT-licensed EXCEPT for the vendored Domino correction-head
+files, which are Apache License 2.0 (Copyright 2023-2024 SGLang Team):
+
+    sglang_dominotree/src/dominotree_sglang/domino_helper.py
+    sglang_dominotree/src/dominotree_sglang/domino_kernels.py
+    sglang_dominotree/src/dominotree_sglang/domino_rollout.py
+
+They are copied verbatim (import paths aside) from the official Domino SGLang
+fork, github.com/jianuo-huang/Domino @ sglang-feat/dflash-domino, whose root
+carries SGLang's Apache-2.0 LICENSE. The full license text ships as
+sglang_dominotree/LICENSE.apache-2.0; provenance, the exhaustive list of
+modifications, and a mechanical verbatim-copy proof are in
+sglang_dominotree/PROVENANCE.md.
