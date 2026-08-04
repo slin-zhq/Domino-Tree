@@ -214,6 +214,15 @@ class DominoWorkerV2(DFlashWorkerV2):
             return out
 
         def _domino_sample_draft_block(*, hidden_states, lm_head, chunk_size: int = 256):
+            if not getattr(self, "_domino_hook_confirmed", False):
+                self._domino_hook_confirmed = True
+                # Permanent positive signal. Its ABSENCE is the alarm: upstream's
+                # folded draft sampler once bypassed this hook entirely and tau
+                # silently fell 4.0 -> 1.0 with no error. If this line is missing
+                # from a server log, the GRU correction is not running.
+                logger.info(
+                    "DOMINO: GRU correction active (draft sampling hook installed)."
+                )
             draft_hidden = captured.get("draft_hidden")
             if draft_hidden is None or verified_id is None:
                 # Fall back to plain greedy drafting. This is a CORRECTNESS-SAFE but

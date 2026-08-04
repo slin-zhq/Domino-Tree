@@ -99,6 +99,38 @@ def _build_spec_class(algo_name: str = "DOMINO"):
 
             _handle_dflash(server_args)
 
+            # REQUIRED on SGLang newer than 1adb53f14 -- otherwise the Domino GRU
+            # correction is silently never applied and acceptance collapses to ~1.0.
+            #
+            # Upstream now folds DFLASH's greedy draft head into the draft CUDA graph
+            # and reads the drafted tokens straight out of a precomputed buffer:
+            #     if self._draft_sampler is not None and draft_out.can_run_graph:
+            #         draft_next = self._draft_sampler.out[...]
+            #     else:
+            #         draft_next = self._greedy_sample_from_vocab_parallel_head(...)
+            # We implement Domino by REPLACING that second call with the GRU-corrected
+            # rollout, so whenever the folded path is taken our hook never runs, the
+            # draft is plain DFlash-on-Domino-weights, and tau drops ~4.0 -> ~1.0 with
+            # no error anywhere. Measured on 4B: 4.00 -> 1.01.
+            #
+            # SGLANG_DFLASH_EAGER_DRAFT_SAMPLER=1 is upstream's own supported switch to
+            # keep that head eager (dflash_worker_v2._maybe_build_draft_sampler). It
+            # costs us nothing -- we never use upstream's greedy head, we override it --
+            # and unlike --disable-cuda-graph it leaves the target-verify, decode and
+            # frontier-builder graphs fully intact.
+            import os
+
+            prev = os.environ.get("SGLANG_DFLASH_EAGER_DRAFT_SAMPLER")
+            if prev not in (None, "1"):
+                logger.warning(
+                    "Overriding SGLANG_DFLASH_EAGER_DRAFT_SAMPLER=%s -> 1: the folded "
+                    "draft sampler bypasses the Domino GRU correction and would make "
+                    "%s silently degenerate.",
+                    prev,
+                    algo_name,
+                )
+            os.environ["SGLANG_DFLASH_EAGER_DRAFT_SAMPLER"] = "1"
+
             # P5 fail-fast guards (main process, before any model load):
             # DOMINOTREE-specific configs (page_size!=1, compact draft cache,
             # rejection sampling, non-default accept thresholds, custom logit
