@@ -624,7 +624,18 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             ForwardBatch,
             ForwardMode,
         )
-        from sglang.srt.speculative.eagle_info_v2 import assign_extend_cache_locs_func
+        # UPSTREAM MOVE: sglang.srt.speculative.eagle_info_v2 was DELETED upstream and
+        # this helper now lives in the kernels package. Try the new home first, fall
+        # back to the old one so the plugin still imports on SGLang <= 1adb53f14 (the
+        # commit every published v2 number was measured on).
+        try:
+            from sglang.kernels.ops.speculative.cache_locs import (
+                assign_extend_cache_locs_func,
+            )
+        except ImportError:  # pragma: no cover - legacy SGLang
+            from sglang.srt.speculative.eagle_info_v2 import (
+                assign_extend_cache_locs_func,
+            )
         from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
         device = self.device
@@ -1254,6 +1265,11 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         # 7) Tree acceptance. eagle_sample dispatches greedy (T=0) vs
         # threshold-sampled (T>0) internally on sampling_info; accept_lens
         # includes the bonus token.
+        # NOTE: the 4th argument is passed POSITIONALLY on purpose. Upstream renamed
+        # it (`vocab_mask: torch.Tensor` -> `grammar_mask: Optional[GrammarMask]`)
+        # after 1adb53f14; both accept None, so a positional None is the one form
+        # that binds on either version. Do NOT "clean this up" into a keyword -- that
+        # would pin us to exactly one SGLang.
         predict, accept_lens, accept_index = eagle_sample(
             verify_input, batch, logits_output, None
         )
