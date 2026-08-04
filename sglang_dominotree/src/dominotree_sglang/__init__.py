@@ -46,6 +46,19 @@ def _build_spec_class(algo_name: str = "DOMINO"):
         def is_dflash(self) -> bool:
             return True
 
+        def is_dflash_family(self) -> bool:
+            # REQUIRED on SGLang newer than 1adb53f14. Upstream added
+            # is_dflash_family() and switched the CUDA-graph capture dispatch to it
+            # (decode_cuda_graph_runner.get_spec_info). On the SpeculativeAlgorithm
+            # *enum* it delegates: `is_dflash() or is_dspark()`. But CustomSpecAlgo --
+            # the plugin base class -- hardcodes it to False instead of delegating,
+            # so overriding is_dflash() alone stopped being enough: capture builds NO
+            # spec_info for us, the verify batch falls into the "normal extend"
+            # branch, and the server dies at startup with
+            #     flashinfer_backend.call_begin_forward: assert prefix_lens is not None
+            # Harmless on older SGLang, which never calls this method.
+            return True
+
         def supports_target_verify_for_draft(self) -> bool:
             # DFLASH enum returns is_dflash() -> True.
             return True
@@ -61,14 +74,20 @@ def _build_spec_class(algo_name: str = "DOMINO"):
             # FutureMap (overlap_utils.py:152).
             return False
 
-        def create_future_map(
-            self, device, req_to_token_pool, needs_cpu_seq_lens: bool = True
-        ):
-            # Mirror the enum's implementation (scheduler.py:1236 calls this
-            # unconditionally). Base CustomSpecAlgo does not define it.
+        def create_future_map(self, device, req_to_token_pool, **kwargs):
+            # Mirror the enum's implementation; base CustomSpecAlgo does not define
+            # this, and the scheduler calls it unconditionally (init_overlap).
+            #
+            # **kwargs ON PURPOSE. The scheduler passes these BY KEYWORD and the set
+            # grows over time -- 1adb53f14 passed only needs_cpu_seq_lens; current
+            # upstream also passes needs_confidence_relay, which broke a fixed
+            # signature here with
+            #     TypeError: create_future_map() got an unexpected keyword argument
+            # Forwarding verbatim means we track FutureMap's signature for free and
+            # stay compatible in both directions, instead of chasing each new flag.
             from sglang.srt.managers.overlap_utils import FutureMap
 
-            return FutureMap(device, self, req_to_token_pool, needs_cpu_seq_lens)
+            return FutureMap(device, self, req_to_token_pool, **kwargs)
 
         def handle_server_args(self, server_args) -> None:
             # Reuse ALL of DFLASH's server-arg normalization (num_steps=1,

@@ -45,6 +45,24 @@ from .domino_rollout import DFlashDominoRollout
 logger = logging.getLogger(__name__)
 
 
+def _draft_bonus_tokens(draft_input):
+    """The previous round's accepted/bonus token(s), across SGLang versions.
+
+    Upstream renamed DFlashDraftInputV2.verified_id -> bonus_tokens after
+    1adb53f14. Both name the same thing: the last accepted token per request,
+    which seeds the next draft.
+    """
+    v = getattr(draft_input, "bonus_tokens", None)
+    if v is None:
+        v = getattr(draft_input, "verified_id", None)
+    if v is None:
+        raise AttributeError(
+            f"{type(draft_input).__name__} exposes neither bonus_tokens nor "
+            "verified_id -- the upstream draft-input contract changed again."
+        )
+    return v
+
+
 def assert_domino_server_args_supported(server_args, algo_name: str) -> None:
     """Fail fast at LAUNCH on server configs the Domino plugin does not support.
 
@@ -643,7 +661,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         n = int(self.block_size)
         draft_input = model_worker_batch.spec_info
         prefix_lens = model_worker_batch.seq_lens
-        verified = draft_input.verified_id.view(-1)
+        verified = _draft_bonus_tokens(draft_input).view(-1)
 
         target_model = self.target_worker.model_runner.model
         embed_module = target_model.get_input_embeddings()
@@ -1171,7 +1189,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         n = int(self.block_size)
         prefix_lens = batch.seq_lens
         draft_input = batch.spec_info
-        verified = draft_input.verified_id.view(-1)
+        verified = _draft_bonus_tokens(draft_input).view(-1)
 
         # 1) Domino block draft (raw per-position hidden).
         draft_hidden = self._domino_draft_block(batch)  # [bs, N, H]
@@ -1315,14 +1333,25 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         bonus = torch.gather(
             predict.view(bs, n), 1, (accept_lens - 1).view(bs, 1).to(torch.int64)
         ).view(-1)
-        next_draft_input = self._make_next_draft_input_decode(
-            verified_id=bonus,
-            new_seq_lens=new_seq_lens,
-            cur_allocated_seq_lens_cpu=draft_input.reserved_seq_lens_cpu,
-        )
-        verify_done = torch.get_device_module(device).Event()
-        verify_done.record()
-        next_draft_input.verify_done = verify_done
+        # UPSTREAM CONTRACT CHANGE (post-1adb53f14). DFlashDraftInputV2 was
+        # restructured: `verified_id` -> `bonus_tokens`, and `verify_done` plus
+        # `cur_allocated_seq_lens_cpu` were REMOVED outright (`verify_done` has zero
+        # occurrences in current upstream -- the cross-iteration CUDA-event handshake
+        # is gone). `_make_next_draft_input_decode` kept its name but lost two
+        # keyword args, so call it with the new shape and fall back to the old one.
+        try:
+            next_draft_input = self._make_next_draft_input_decode(
+                bonus_tokens=bonus, new_seq_lens=new_seq_lens
+            )
+        except TypeError:  # legacy SGLang <= 1adb53f14
+            next_draft_input = self._make_next_draft_input_decode(
+                verified_id=bonus,
+                new_seq_lens=new_seq_lens,
+                cur_allocated_seq_lens_cpu=draft_input.reserved_seq_lens_cpu,
+            )
+            verify_done = torch.get_device_module(device).Event()
+            verify_done.record()
+            next_draft_input.verify_done = verify_done
 
         return GenerationBatchResult(
             logits_output=logits_output,
