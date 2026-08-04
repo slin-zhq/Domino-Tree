@@ -231,6 +231,25 @@ def check_server(base_url: str, model_path: str, timeout_s: int) -> None:
         print("[warn] could not query /get_model_info; skipping served-model sanity check.")
 
 
+def flush_cache(base_url: str, timeout_s: int = 60) -> None:
+    """GET /flush_cache so a measurement block starts with a cold prefix cache.
+
+    Granularity matches the reference benchmarks -- per measurement CELL, not per
+    prompt (verified 2026-07-29: DFlash `benchmark.py` flushes once per run before
+    its warmup; Domino `benchmark_sglang.py` flushes once per concurrency cell).
+    Flushing per prompt would be a STRICTER protocol than the baselines we are
+    compared against and would understate our numbers relative to theirs.
+
+    Warn, do not die: a failed flush degrades hygiene, it does not invalidate the run.
+    """
+    import urllib.request
+    try:
+        with urllib.request.urlopen(base_url.rstrip("/") + "/flush_cache", timeout=timeout_s):
+            pass
+    except Exception as exc:  # pragma: no cover - network hiccup
+        print(f"[warn] /flush_cache failed ({exc}); continuing (cache may be warm).")
+
+
 def main() -> None:
     args = parse_args()
     # Convenience: accept the underscore spelling; canonical name (used by the
@@ -260,6 +279,10 @@ def main() -> None:
             "top_k": -1,
             "max_new_tokens": int(max_new_tokens),
         }
+
+    # This driver is invoked once per (dataset, temperature) cell, so a single flush
+    # here IS the per-cell granularity the reference benchmarks use.
+    flush_cache(base_url, args.request_timeout)
 
     # ---- Warmup, exactly like ref_benchmark: one "Warmup" chat prompt capped
     # at 16 new tokens, sent before any timing. Doubles as the probe for

@@ -53,7 +53,7 @@ OUTPUT — one aggregated JSONL row per (method, task, length_bin)
 `gen_tokens`  = the cell's HELMET gen_cap (per-task: 1200 summ / 300 cite), unless
                 clamped with --gen-cap-clamp (a documented cost knob).
 
-Usage (server already running for ONE method; see README.md):
+Usage (server already running for ONE method; see RUNBOOK_helmet.md):
   python helmet_longctx.py --host 127.0.0.1 --port 31600 \\
       --method dominotree --model-label qwen3-8b \\
       --prompts-dir prompts/qwen3-8b \\
@@ -62,7 +62,7 @@ Usage (server already running for ONE method; see README.md):
       --out out/dominotree/helmet_8b.jsonl
 
 Offline self-test (no server, no GPU, no network, no transformers):
-  (dev self-test lives in the source repo)
+  python selftest_helmet.py
   python helmet_longctx.py --dry-run --prompts-dir <fixture> \\
       --tasks demo --length-bins 1024 --n-prompts 3 --method dominotree --out /tmp/h.jsonl
 """
@@ -116,7 +116,7 @@ def load_cell(prompts_dir: str, task: str, length_bin: int, n_prompts: int) -> l
         raise SystemExit(
             f"missing HELMET cell {p}\n"
             f"  run helmet_prep.py first to materialise task={task} bin={length_bin} "
-            f"for this model (see README.md Step 2)."
+            f"for this model (see RUNBOOK_helmet.md Step 2)."
         )
     rows: list[dict] = []
     with p.open("r", encoding="utf-8") as f:
@@ -194,7 +194,7 @@ def check_server(base_url: str, model_label: str, timeout_s: int) -> None:
     except requests.RequestException as exc:  # type: ignore[name-defined]
         raise SystemExit(
             f"cannot reach SGLang server at {base_url} ({exc}).\n"
-            "Launch the method's server first — see README.md."
+            "Launch the method's server first — see RUNBOOK_helmet.md."
         )
     if resp.status_code != 200:
         raise SystemExit(f"{base_url}/health returned HTTP {resp.status_code}: {resp.text[:200]}")
@@ -207,7 +207,7 @@ def check_server(base_url: str, model_label: str, timeout_s: int) -> None:
 
 
 # --------------------------------------------------------------------------
-# Aggregation — PURE function (unit-tested in the source repo).
+# Aggregation — PURE function, unit-tested offline by selftest_helmet.py.
 # (Identical semantics to longctx_probe.aggregate.)
 # --------------------------------------------------------------------------
 def aggregate(per_prompt: list[dict], gen_tokens: int) -> dict:
@@ -275,6 +275,25 @@ def parse_args(argv=None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def flush_cache(base_url: str, timeout_s: int = 60) -> None:
+    """GET /flush_cache so a measurement block starts with a cold prefix cache.
+
+    Granularity matches the reference benchmarks -- per measurement CELL, not per
+    prompt (verified 2026-07-29: DFlash `benchmark.py` flushes once per run before
+    its warmup; Domino `benchmark_sglang.py` flushes once per concurrency cell).
+    Flushing per prompt would be a STRICTER protocol than the baselines we are
+    compared against and would understate our numbers relative to theirs.
+
+    Warn, do not die: a failed flush degrades hygiene, it does not invalidate the run.
+    """
+    import urllib.request
+    try:
+        with urllib.request.urlopen(base_url.rstrip("/") + "/flush_cache", timeout=timeout_s):
+            pass
+    except Exception as exc:  # pragma: no cover - network hiccup
+        print(f"[warn] /flush_cache failed ({exc}); continuing (cache may be warm).")
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     tasks = parse_str_list(args.tasks, "tasks")
@@ -296,7 +315,9 @@ def main(argv=None) -> int:
                        dry_accept=args.dry_run_accept, dry_latency=args.dry_run_latency)
 
     # ---- warmup (real runs only): one short generation to reach steady state ----
+    # Flush first, then warm up, then time -- the order DFlash and Domino use.
     if not args.dry_run:
+        flush_cache(base_url, args.request_timeout)
         try:
             probe_cell = load_cell(args.prompts_dir, tasks[0], length_bins[0], 1)
             send(probe_cell[0]["text"], {"temperature": float(args.temperature),
@@ -315,6 +336,10 @@ def main(argv=None) -> int:
     t_all = time.time()
     for task in tasks:
         for L in length_bins:
+            # Cold cache at the start of every (task, length_bin) cell, matching the
+            # reference benchmarks' per-cell granularity.
+            if not args.dry_run:
+                flush_cache(base_url, args.request_timeout)
             cell = load_cell(args.prompts_dir, task, L, int(args.n_prompts))
             gen_cap = cell_gen_cap(cell, task, args.gen_cap_clamp)
             sampling = {
