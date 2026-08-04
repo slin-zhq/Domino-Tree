@@ -1,0 +1,1 @@
+rc=0 oom=0 post_health=200 peak_running_req=32 mtt=63058 method=ar cap=32 memfrac=0.80 prefill=on

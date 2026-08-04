@@ -1,0 +1,12 @@
+collected_utc=2026-07-28 16:39:19
+prefill_cuda_graph=ON (stock SGLang default; no --cuda-graph-backend-prefill flag)
+memfrac=0.80
+orchestrator=run_helmet_all.sh (validated, unmodified)
+npr=50
+reason=representativeness: published data used the non-default graph-off config
+measured_effect_of_flag=~0% (see prefill_graph_oom_attribution.md §7)
+plugin_git=unknown
+sglang=0.5.15.post1
+plugin_path=/home/r13922176/dominotree_plugin/src/dominotree_sglang
+plugin_git=NOT A GIT TREE on this box (installed copy) -- use the hash below
+plugin_src_sha256=200d166fb95393e480940a54ccea80c5fe8094e56c40667f11fedbf5aa015974  (13 .py files, sha256 of sorted per-file sha256s)
