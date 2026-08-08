@@ -33,7 +33,7 @@ METHOD-AGNOSTIC
 ---------------
 `--method {ar,dflash,eagle3,domino_chain,dominotree}` is only a LABEL stamped on
 each row; the driver cannot verify which speculative algorithm the server on
-`--port` runs (a Step-2 sanity curl in the RUNBOOK does). Apply identical serving
+`--port` runs (the Step-2 sanity curl in helmet/README.md does). Apply identical serving
 flags across methods (the launcher does) so any tau/tps delta reflects the method.
 
 SAMPLE-SIZE-AS-PREFIX (n=50 -> n=100 supplement)
@@ -53,7 +53,7 @@ OUTPUT — one aggregated JSONL row per (method, task, length_bin)
 `gen_tokens`  = the cell's HELMET gen_cap (per-task: 1200 summ / 300 cite), unless
                 clamped with --gen-cap-clamp (a documented cost knob).
 
-Usage (server already running for ONE method; see RUNBOOK_helmet.md):
+Usage (server already running for ONE method; see helmet/README.md):
   python helmet_longctx.py --host 127.0.0.1 --port 31600 \\
       --method dominotree --model-label qwen3-8b \\
       --prompts-dir prompts/qwen3-8b \\
@@ -116,7 +116,7 @@ def load_cell(prompts_dir: str, task: str, length_bin: int, n_prompts: int) -> l
         raise SystemExit(
             f"missing HELMET cell {p}\n"
             f"  run helmet_prep.py first to materialise task={task} bin={length_bin} "
-            f"for this model (see RUNBOOK_helmet.md Step 2)."
+            f"for this model (see helmet/README.md Step 2)."
         )
     rows: list[dict] = []
     with p.open("r", encoding="utf-8") as f:
@@ -194,7 +194,7 @@ def check_server(base_url: str, model_label: str, timeout_s: int) -> None:
     except requests.RequestException as exc:  # type: ignore[name-defined]
         raise SystemExit(
             f"cannot reach SGLang server at {base_url} ({exc}).\n"
-            "Launch the method's server first — see RUNBOOK_helmet.md."
+            "Launch the method's server first — see helmet/README.md."
         )
     if resp.status_code != 200:
         raise SystemExit(f"{base_url}/health returned HTTP {resp.status_code}: {resp.text[:200]}")

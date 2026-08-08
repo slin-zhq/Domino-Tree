@@ -28,7 +28,9 @@ Therefore:
   hardware**, not per-step cost. A telltale sign is a flat tail (e.g. `1142 → 1144 →
 1151` across c = 8, 16, 32).
 - **The cap is part of the result.** `run_conc_all.sh` records it in
-  `status_<method>.txt`; report it with the numbers.
+  `status_<method>.done`; report it with the numbers. (That is the same filename
+  `results/serving/verify_published_numbers.py` reads the published caps from, so your
+  own run stays comparable to ours.)
 
 A larger-memory GPU raises every cap and pushes each crossover to the right, so the
 concurrency at which a chain overtakes a tree is a statement about the device, not
@@ -36,13 +38,24 @@ about the methods.
 
 ## Step 1 — find each method's cap
 
+It boots at each candidate cap, bursts that many concurrent requests, and prints the
+first cap that survives. Run it once **per method** — each takes a different draft
+variable, and `ar` takes none:
+
 ```bash
-METHOD=dominotree MODEL=Qwen/Qwen3-8B TP=2 DRAFT_DOMINO=./Qwen3-8B-Domino-b16 \
-  bash find_caps.sh 32 16 12 8 4
+CAPS="32 16 12 8 4"                      # candidates, tried high to low
+COMMON="MODEL=./Qwen3-8B TP=2"           # target + TP; use TP=1 for the 4B target
+
+env $COMMON METHOD=ar                                        bash find_caps.sh $CAPS
+env $COMMON METHOD=dominotree   DRAFT_DOMINO=./Qwen3-8B-Domino-b16 bash find_caps.sh $CAPS
+env $COMMON METHOD=domino_chain DRAFT_DOMINO=./Qwen3-8B-Domino-b16 bash find_caps.sh $CAPS
+env $COMMON METHOD=dflash       DRAFT_DFLASH=./Qwen3-8B-DFlash-b16 bash find_caps.sh $CAPS
+env $COMMON METHOD=eagle3       DRAFT_EAGLE3=./Qwen3-8B_eagle3     bash find_caps.sh $CAPS
 ```
 
-It boots at each candidate and bursts that many concurrent requests, printing the
-first cap that survives. Repeat per method.
+Checkpoint identities for every method are in [`../README.md`](../README.md). Other
+variables the script reads, with their defaults: `TP` (1), `PY` (`python`),
+`PORT` (31690), `MEMFRAC` (0.85). `METHOD` and `MODEL` are required.
 
 For reference, the paper's caps on **2×16 GB cards** (RTX 5080) were:
 

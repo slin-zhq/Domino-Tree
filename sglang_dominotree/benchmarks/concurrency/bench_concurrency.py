@@ -37,7 +37,7 @@ For every (dataset, concurrency) cell:
          mean_accept = mean(meta_info.spec_accept_length)   (over timed reqs)
      These are Domino's `output_toks_per_s` and mean `spec_accept_length`.
 
-PROMPT SELECTION (deliberate, documented deviation from Domino — see RUNBOOK)
+PROMPT SELECTION (deliberate, documented deviation from Domino — see concurrency/README.md)
 ----------------------------------------------------------------------------
 Domino's ref concurrency driver takes the first-N prompts in NATURAL dataset
 order.  We instead reuse OUR bs=1 driver's subsetting so the bs=1 and concurrency
@@ -62,14 +62,14 @@ requests.  For every single-turn dataset (gsm8k/mbpp/... all have one turn) this
 is byte-identical to the bs=1 prompt; for mt-bench it is the bs=1 first turn.
 
 Usage (server must already be running; this driver does NOT launch it):
-  python conc_bench_datasets.py --host 127.0.0.1 --port 31650 \
+  python bench_concurrency.py --host 127.0.0.1 --port 31650 \
       --method dflash --model-label qwen3-4b --model-path Qwen/Qwen3-4B \
       --tasks gsm8k:128,mbpp:128,mt-bench:80 --concurrencies 1,2,4,8,16,32 \
       --max-new-tokens 2048 --warmup-requests 3 --warmup-max-new-tokens 1024 \
       --skip-first 1 --out-jsonl out/conc_dflash_4b.jsonl --out-md out/conc_dflash_4b.md
 
 Self-test (no server, no GPU, no datasets/transformers needed):
-  python selftest_conc.py
+  python -c "import bench_concurrency"   # import check
 """
 
 from __future__ import annotations
@@ -157,7 +157,7 @@ def cycle_take(pool: list[str], n: int) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# Goodput aggregation — PURE function, unit-tested offline by selftest_conc.py.
+# Goodput aggregation — PURE function (no I/O), so it is exercised by --dry-run.
 # --------------------------------------------------------------------------
 def aggregate(metas: list[dict], wall_s: float) -> dict:
     """Domino's goodput math over a list of per-request `meta_info` dicts.
@@ -291,7 +291,7 @@ def check_server(base_url: str, timeout_s: int = 30) -> None:
     except requests.RequestException as exc:  # type: ignore[name-defined]
         raise SystemExit(
             f"cannot reach SGLang server at {base_url} ({exc}). "
-            "Launch the method's server first — see RUNBOOK_conc.md."
+            "Launch the method's server first — see concurrency/README.md."
         )
     if resp.status_code != 200:
         raise SystemExit(f"{base_url}/health returned HTTP {resp.status_code}: {resp.text[:200]}")

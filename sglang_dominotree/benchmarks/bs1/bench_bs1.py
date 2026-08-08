@@ -45,7 +45,7 @@ speedup-over-own-AR comparisons remain valid; flagged for the paper text):
     end of the round in which EOS appears (may commit a few tokens past EOS).
     Sub-token-level difference, uniform across methods.
 
-Usage (one method label per server; see RUN_SGLANG_BENCH.md):
+Usage (one method label per server; see bs1/README.md):
 
   python bench_bs1.py --port 30000 --method dominotree@16 \\
       --dataset gsm8k --temperature 0.0 --model-path Qwen/Qwen3-4B \\
@@ -214,7 +214,7 @@ def check_server(base_url: str, model_path: str, timeout_s: int) -> None:
     except requests.RequestException as exc:
         raise SystemExit(
             f"cannot reach SGLang server at {base_url} ({exc}).\n"
-            "Launch the server for this method first — see RUN_SGLANG_BENCH.md."
+            "Launch the server for this method first — see bs1/README.md."
         )
     if resp.status_code != 200:
         raise SystemExit(f"{base_url}/health returned HTTP {resp.status_code}: {resp.text[:200]}")

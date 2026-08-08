@@ -29,7 +29,7 @@ Two facts come from HELMET, not from us; both are parameterised, never guessed:
   2. HELMET's per-task instruction TEMPLATE. Either the example jsonl already holds
      a ready prompt field (--prompt-field), OR we format a template string you copy
      verbatim from HELMET's config for that task (--template / --template-file).
-Smoke-test with --limit 2 and eyeball one `text` before scaling (RUNBOOK Step 2b).
+Smoke-test with --limit 2 and eyeball one `text` before scaling (README.md Step 2b).
 
 OFFLINE FIXTURE (works now, no HELMET / no tokenizer / no GPU)
 -------------------------------------------------------------
