@@ -141,6 +141,32 @@ with `OUT_DIR`).
 The default builder is the GPU-native CUDA-graph tree builder (`dominotree_gpu.py`),
 bit-identical to the pure-Python reference (`--python-builder`) at lower build cost.
 
+### Collecting Table 1 end to end
+
+[`run_pipeline.sh`](run_pipeline.sh) is the one-command version: it collects DominoTree +
+AR with our harness, then official Domino (eager and `--use-graph`) with Domino's own
+benchmark, then builds the tables. It resumes — finished cells are skipped — and it
+checks its dependencies up front rather than failing deep inside a run.
+
+```bash
+MODEL_PATH=/path/to/Qwen3-4B \
+DRAFT_PATH=/path/to/Qwen3-4B-Domino-b16 \
+DOMINO_CODE=/path/to/Domino/code \
+  bash run_pipeline.sh
+```
+
+It writes **your** data to `results/raw_repro/` and **your** tables to
+`results/tables_repro/`, deliberately separate from the frozen `results/raw/` and
+`results/tables_gpunative/` that ship here — so you can diff the two rather than
+overwrite ours. The DFlash / DDTree / CaDDTree reference rows are not re-collected;
+they ship frozen and are linked into your collection so the tables still build.
+
+Two details it handles for you, both easy to get wrong by hand: Domino's released
+benchmark has no warmup prompt, so the pipeline patches a **copy** of it to add one
+(matching how the published 4B baseline was measured — Domino's own source is never
+modified), and Domino is normalized by the lean common AR rather than its own
+`spec_generate(block_size=1)`. Both are explained inline in the script.
+
 ## SGLang serving
 
 DominoTree also runs inside SGLang as a speculative-decoding plugin: a separate package
