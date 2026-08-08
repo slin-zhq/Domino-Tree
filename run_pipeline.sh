@@ -39,7 +39,11 @@ DRAFT_PATH="${DRAFT_PATH:?set DRAFT_PATH to the Domino drafter (e.g. Qwen3-4B-Do
 # whole script then fails to parse. (That bug shipped here once; keep it plain.)
 DOMINO_CODE="${DOMINO_CODE:?set DOMINO_CODE to the code/ dir of the released Domino repo}"
 PY="${PYTHON:-python}"
-OUT="${OUT:-results/raw}"
+# Collect into a SEPARATE tree, never into results/raw. results/raw holds the frozen
+# published data, and every cell this pipeline would write already exists there -- so
+# defaulting to it made the run skip DominoTree entirely and rebuild the tables from our
+# numbers while reporting success. Your results and ours stay in different directories.
+OUT="${OUT:-results/raw_repro}"
 read -r -a DATASETS <<< "${DATASETS:-gsm8k math500 aime25 humaneval mbpp livecodebench mt-bench alpaca}"
 read -r -a TEMPS    <<< "${TEMPS:-0.0 0.5 1.0}"
 N="${N:-50}"; MNT="${MNT:-2048}"; BUDGET="${BUDGET:-16}"; CORR_TOPM="${CORR_TOPM:-64}"
@@ -54,8 +58,35 @@ if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
   [ "${ngpu:-1}" -gt 1 ] && echo "[pipeline] ${ngpu} GPUs found; using GPU 0 (set CUDA_VISIBLE_DEVICES to change). Single-GPU is intentional for clean timing."
 fi
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader -i "${CUDA_VISIBLE_DEVICES%%,*}" 2>/dev/null | head -1)
-ts() { date -Is; }
-mkdir -p "${OUT}/dominotree" "${OUT}/domino_official"
+# `date -Is` is GNU-only; BSD/macOS date rejects it and every log line loses its
+# timestamp. Build the same format portably.
+ts() { date +%Y-%m-%dT%H:%M:%S%z; }
+
+# ---- preflight: fail with an instruction, not a traceback 40 lines deep -----
+missing=""
+"${PY}" -c "import torch" 2>/dev/null || missing="${missing}\n  - torch (ours): pip install -r ${HERE}/requirements.txt, plus a CUDA-matched torch build"
+"${PY}" -c "import loguru" 2>/dev/null || missing="${missing}\n  - loguru (Domino's): pip install -r \"\$(dirname ${DOMINO_CODE})/requirements.txt\" — the released Domino repo has its own deps"
+if [ -n "$missing" ]; then
+  printf "[FATAL] missing Python dependencies:%b\n" "$missing"
+  echo "Both this repo's harness and the released Domino benchmark run in the SAME interpreter (${PY}); install both sets before collecting."
+  exit 1
+fi
+[ -f "${DOMINO_CODE}/benchmark.py" ] || { echo "[FATAL] DOMINO_CODE=${DOMINO_CODE} has no benchmark.py -- point it at the code/ dir of the released Domino repo."; exit 1; }
+
+# Domino's raw files are laid out per target model, which is also how make_latex_table
+# reads them back (domino_official/<model-dir>/T<temp>/<mode>_<dataset>.jsonl).
+DOMINO_MODEL_DIR="${DOMINO_MODEL_DIR:-$(basename "${MODEL_PATH}" | tr '[:upper:]' '[:lower:]')}"
+mkdir -p "${OUT}/dominotree" "${OUT}/domino_official/${DOMINO_MODEL_DIR}"
+
+# The DFlash / DDTree / CaDDTree reference rows are NOT collected here -- they ship
+# frozen (collected on the authors' GPU) and are marked as such in the tables. Seed them
+# into the collection tree by reference so the table build can produce complete tables
+# from what you actually ran plus those frozen rows.
+if [ -d "${HERE}/results/raw/baseline_ddtree_caddtree" ] && [ ! -e "${OUT}/baseline_ddtree_caddtree" ]; then
+  ln -s "${HERE}/results/raw/baseline_ddtree_caddtree" "${OUT}/baseline_ddtree_caddtree" 2>/dev/null \
+    || cp -R "${HERE}/results/raw/baseline_ddtree_caddtree" "${OUT}/baseline_ddtree_caddtree"
+  echo "[pipeline] reference rows (DFlash/DDTree/CaDDTree) linked in from the shipped frozen set; everything else below is collected by you."
+fi
 
 # ---- run manifest (provenance: env, versions, policies) ---------------------
 "${PY}" - "$OUT" "$MODEL_PATH" "$DRAFT_PATH" "$GPU_NAME" "$N" "$MNT" "$BUDGET" "$CORR_TOPM" <<'PYEOF'
@@ -64,7 +95,9 @@ out, model, draft, gpu, n, mnt, budget, corrm = sys.argv[1:9]
 def ver(m):
     try: return __import__(m).__version__
     except Exception: return None
-try: commit = subprocess.check_output(["git","rev-parse","--short","HEAD"], text=True).strip()
+try:  # stderr silenced: running from a tarball rather than a clone is fine, not an error
+    commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"],
+                                     text=True, stderr=subprocess.DEVNULL).strip()
 except Exception: commit = None
 json.dump({
   "config": {"model": model, "draft": draft, "n": int(n), "max_new_tokens": int(mnt),
@@ -147,7 +180,9 @@ run_ours() {  # $1=methods $2=extra-flags $3=out.jsonl
 }
 run_domino() {  # $1=temp $2=mode(graph|eager) $3=dataset
   local gf=""; [ "$2" = graph ] && gf="--use-graph"
-  local ans="${OUT}/domino_official/$2_$3_T$1.jsonl"
+  # layout must match make_latex_table.load_domino_official
+  local ans="${OUT}/domino_official/${DOMINO_MODEL_DIR}/T$1/$2_$3.jsonl"
+  mkdir -p "$(dirname "$ans")"
   [ -f "$ans" ] && { echo "[skip] domino $ans"; return; }
   echo "[$(ts)] DOMINO $3 T$1 $2"
   ( cd "${DOMINO_CODE}" && "${PY}" "${DOMINO_BENCH}" --model-name-or-path "${MODEL_PATH}" \
@@ -182,7 +217,27 @@ for T in "${TEMPS[@]}"; do
 done
 
 # ---- Stage 3: build whatever tables the collected data supports -------------
-echo "[$(ts)] building tables (surgical AR normalization)"
-"${PY}" "${HERE}/make_latex_table.py" --raw-dir "${OUT}" --out-dir "results/tables" --ar-norm surgical \
+# make_latex_table expects a complete grid and raises on the first missing cell, which
+# after a partial collection reads as a crash rather than "you have not collected that
+# yet". Say which cells are missing, then let it run.
+missing_cells=""
+for T in "${TEMPS[@]}"; do
+  for ds in "${DATASETS[@]}"; do
+    [ -f "${OUT}/dominotree/${ds}_T${T}.jsonl" ] || missing_cells="${missing_cells} ${ds}_T${T}"
+  done
+done
+if [ -n "${missing_cells}" ]; then
+  echo "[warn] not all cells were collected; the table build will stop at the first gap."
+  echo "[warn] missing DominoTree cells:${missing_cells}"
+  echo "[warn] re-run this script to retry them -- finished cells are skipped, so it resumes."
+fi
+
+TABLES_OUT="${TABLES_OUT:-${HERE}/results/tables_repro}"
+echo "[$(ts)] building tables (surgical AR normalization) -> ${TABLES_OUT}"
+"${PY}" "${HERE}/make_latex_table.py" --raw-dir "${OUT}" --out-dir "${TABLES_OUT}" --ar-norm surgical \
+  --domino-model-dir "${DOMINO_MODEL_DIR}" \
   --temps "$(IFS=,; echo "${TEMPS[*]}")" || echo "[warn] table build reported issues (see above)"
-echo "[$(ts)] done. Tables in results/tables/ ; provenance in ${OUT}/run_manifest.json"
+echo "[$(ts)] done."
+echo "  your tables : ${TABLES_OUT}/       (ours ship in results/tables_gpunative/ -- compare, do not overwrite)"
+echo "  your raw    : ${OUT}/"
+echo "  provenance  : ${OUT}/run_manifest.json"

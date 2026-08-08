@@ -21,3 +21,7 @@ results/**/*.pt
 results/**/cache/
 results/**/logs/
 results/**/tmp/
+
+# reproduction output (run_pipeline.sh) -- kept out of the published trees
+results/raw_repro/
+results/tables_repro/
