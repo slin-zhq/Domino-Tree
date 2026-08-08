@@ -28,8 +28,7 @@ input length to {8K, 16K, 32K, 64K, 128K}, giving a clean controlled length swee
 
 ## Prerequisites
 
-- SGLang with the `dominotree` plugin installed (see the repo root README →
-  "Serving on SGLang"); `dflash` / `eagle3` are native SGLang algorithms.
+- SGLang with the `dominotree` plugin installed (see the repo root README → "SGLang serving"); `dflash` / `eagle3` are native SGLang algorithms.
 - The target model and each method's draft model available locally.
 - `pip install transformers huggingface_hub` for the prep step.
 

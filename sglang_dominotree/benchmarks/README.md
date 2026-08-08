@@ -27,10 +27,28 @@ methods each.
 
 ## Prerequisites
 
-- SGLang with the `dominotree` plugin installed (repo root README → "Serving on
-  SGLang"). `dflash` and `eagle3` are native SGLang algorithms.
-- The target model and each method's draft model available locally or by HF id.
+- SGLang with the `dominotree` plugin installed — see
+  [`../README.md`](../README.md) → "Install", which pins the SGLang commit and gives the
+  exact environment. `dflash` and `eagle3` are native SGLang algorithms and need no plugin.
 - `pip install requests transformers datasets`.
+- Every checkpoint below, downloaded locally. The runner scripts take **filesystem paths**,
+  not HF ids, so fetch them first (`huggingface-cli download <id> --local-dir <path>`).
+
+### Checkpoints — every method, both sizes
+
+| Method         | Draft checkpoint (`4B` / `8B`)                                                | Env var         |
+| -------------- | ----------------------------------------------------------------------------- | --------------- |
+| `ar`           | *(none — target only)*                                                        | —               |
+| `dflash`       | [`z-lab/Qwen3-4B-DFlash-b16`](https://huggingface.co/z-lab/Qwen3-4B-DFlash-b16) / [`z-lab/Qwen3-8B-DFlash-b16`](https://huggingface.co/z-lab/Qwen3-8B-DFlash-b16) | `DRAFT_DFLASH`  |
+| `eagle3`       | [`AngelSlim/Qwen3-4B_eagle3`](https://huggingface.co/AngelSlim/Qwen3-4B_eagle3) / [`AngelSlim/Qwen3-8B_eagle3`](https://huggingface.co/AngelSlim/Qwen3-8B_eagle3) | `DRAFT_EAGLE3`  |
+| `domino_chain` | [`Huang2020/Qwen3-4B-Domino-b16`](https://huggingface.co/Huang2020/Qwen3-4B-Domino-b16) / [`Huang2020/Qwen3-8B-Domino-b16`](https://huggingface.co/Huang2020/Qwen3-8B-Domino-b16) | `DRAFT_DOMINO`  |
+| `dominotree`   | same as `domino_chain` — the tree is training-free on Domino's checkpoint     | `DRAFT_DOMINO`  |
+
+Targets: [`Qwen/Qwen3-4B`](https://huggingface.co/Qwen/Qwen3-4B) (TP=1) and
+[`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B) (TP=2), passed as `MODEL`.
+
+The example invocations in the sub-benchmark READMEs use short local paths such as
+`./Qwen3-4B_eagle3`; substitute wherever you downloaded each checkpoint.
 
 ## The fairness rule
 

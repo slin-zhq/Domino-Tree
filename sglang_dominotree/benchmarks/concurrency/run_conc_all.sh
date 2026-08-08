@@ -91,7 +91,7 @@ for M in $METHODS; do
   done
   if [ "$ok" -ne 1 ]; then
     log "!! SERVER $M FAILED TO BOOT (900s) -- see server_${M}.log; skipping"
-    echo "boot_fail cap=$CAP" > "$HERE/status_${M}.txt"; PREV_PORT=$P; continue
+    echo "boot_fail cap=$CAP" > "$HERE/status_${M}.done"; PREV_PORT=$P; continue
   fi
   log "server $M HEALTHY (cap=$CAP)"
 
@@ -114,7 +114,7 @@ for M in $METHODS; do
   cells=$(wc -l < "$OUT/$M/${M}.jsonl" 2>/dev/null || echo 0)
   log "driver $M exit=$rc cells=$cells"
   # The cap is part of the result: record it next to the data.
-  echo "done rc=$rc cap=$CAP cells=$cells" > "$HERE/status_${M}.txt"
+  echo "done rc=$rc cap=$CAP cells=$cells" > "$HERE/status_${M}.done"
   PREV_PORT=$P
 done
 

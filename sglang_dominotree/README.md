@@ -16,19 +16,66 @@ target would itself have emitted are committed.
 
 ## Install
 
-```bash
-pip install -e .
-```
+The plugin itself is trivial to install. **Getting a matching SGLang is the real work**, so
+do that first.
 
-`sglang`, `torch`, and `triton` are deliberately not declared as dependencies — the plugin
-is only ever imported into an environment that already has a matching SGLang and its
-CUDA-matched wheels, and pinning them here risks clobbering that stack.
+### 1. SGLang at the validated commit
 
 The plugin binds to SGLang internals (the DFLASH-v2 worker, the EAGLE verify helpers, the
-model registry), so it tracks specific upstream versions rather than a range. It needs an
-upstream SGLang with the `sglang.srt.plugins` entry point and DFLASH-v2, and is validated
-against upstream commit `1adb53f14`. A startup contract check names any upstream attribute
-it depends on that has moved, and refuses to start rather than silently degrading.
+model registry), so it tracks a specific upstream version rather than a range. It needs an
+upstream SGLang with the `sglang.srt.plugins` entry point and DFLASH-v2, and every published
+number was collected against commit **`1adb53f14`**:
+
+```bash
+git clone https://github.com/sgl-project/sglang.git
+cd sglang && git checkout 1adb53f14
+```
+
+Then install it following [SGLang's own installation guide](https://docs.sglang.ai/get_started/install.html)
+for **your** CUDA version and GPU architecture — that is the part we cannot write for you,
+because the `sgl-kernel` and `flashinfer` wheels are built per CUDA line and per arch. We
+installed it editable (`pip install -e python/`).
+
+For reference, the exact environment behind the published serving numbers:
+
+| | |
+| --- | --- |
+| GPU / arch | 2 × RTX 5080 (Blackwell, `sm_120`), CUDA 13.0 |
+| Python | 3.12.3 |
+| `torch` | 2.11.0 (cu130 index) |
+| `sglang` | 0.5.15.post1, editable from source @ `1adb53f14` |
+| `sglang-kernel` | 0.4.4 |
+| `triton` | 3.6.0 |
+| `transformers` | 5.8.1 |
+
+> **Architecture caveat.** This is a CUDA-13 / Blackwell stack. On an Ampere card (`sm_86`,
+> e.g. A6000) the matching `sgl_kernel` wheel is not available on the cu13 line, and the
+> plugin will not run there — that is an SGLang packaging constraint, not a plugin one.
+> Building on a different CUDA line is fine as long as SGLang itself works; only the pinned
+> commit matters to us.
+
+### 2. The plugin
+
+```bash
+pip install -e .          # from sglang_dominotree/
+```
+
+`sglang`, `torch`, and `triton` are deliberately **not** declared as dependencies — the
+plugin is only ever imported into an environment that already has a matching SGLang and its
+CUDA-matched wheels, and pinning them here would clobber that stack. So this step installs
+almost nothing (a few seconds) and cannot repair a broken SGLang install; step 1 has to be
+working first.
+
+Verify the entry point is visible:
+
+```bash
+python -c "from importlib.metadata import entry_points; print(list(entry_points(group='sglang.srt.plugins')))"
+# -> [EntryPoint(name='dominotree', value='dominotree_sglang:register_plugin', ...)]
+```
+
+A startup contract check names any upstream attribute the plugin depends on that has moved,
+and refuses to start rather than silently degrading — so if you point it at a different
+SGLang, you get a named failure instead of wrong numbers.
 
 ## Serve
 
