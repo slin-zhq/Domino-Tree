@@ -89,13 +89,13 @@ pinned commit, recorded in [`sglang_dominotree/PROVENANCE.md`](sglang_dominotree
 **Upstream projects.** Only the first is needed to run anything here; the rest are the
 baselines, pinned at the commits their numbers were collected from.
 
-| Project                                                  | Role here                       | Pinned at    |
-| -------------------------------------------------------- | ------------------------------- | ------------ |
-| [Domino](https://github.com/jianuo-huang/Domino)         | drafter + head; required to run | `e4aad4851`  |
-| [CaDDTree](https://github.com/ZhangShuai1230/CaDDTree)   | AR / DFlash / DDTree / CaDDTree baselines | `a88f3f3` |
-| [DFlash](https://github.com/z-lab/dflash)                | the DFlash drafter checkpoint   | —            |
-| [DDTree](https://github.com/liranringel/ddtree)          | the tree baseline's origin      | —            |
-| [SGLang](https://github.com/sgl-project/sglang)          | serving engine for the plugin   | `1adb53f14`  |
+| Project                                                | Role here                                 | Pinned at                              |
+| ------------------------------------------------------ | ----------------------------------------- | -------------------------------------- |
+| [Domino](https://github.com/jianuo-huang/Domino)       | drafter + head; required to run           | `e4aad4851`                            |
+| [CaDDTree](https://github.com/ZhangShuai1230/CaDDTree) | AR / DFlash / DDTree / CaDDTree baselines | `a88f3f3`                              |
+| [DFlash](https://github.com/z-lab/dflash)              | the DFlash drafter checkpoint             | Not pinned  |
+| [DDTree](https://github.com/liranringel/ddtree)        | the tree baseline's origin                | Not pinned  |
+| [SGLang](https://github.com/sgl-project/sglang)        | serving engine for the plugin             | `1adb53f14`                            |
 
 ## HF research harness
 
@@ -241,16 +241,16 @@ baseline. Collections taken **before** their script had that prompt use method 2
 which is what the flags select. Nothing was re-run: the frozen JSONL is what it is, and the
 flags describe it honestly rather than papering over it.
 
-| Collection          | Script had a warmup prompt?                         | So the table builder    | n  |
-| ------------------- | --------------------------------------------------- | ----------------------- | -- |
-| Ours, 4B (frozen)   | no — predates the warmup we added to `benchmark.py` | drops row 1 (default)   | 49 |
-| Ours, 8B            | yes                                                 | keeps all (`--no-warmup-drop`)   | 50 |
-| Official Domino, 4B | yes — our `benchmark_noar.py` variant               | keeps all (default)     | 50 |
-| Official Domino, 8B | no — Domino's stock `benchmark.py`                  | drops row 1 (`--domino-no-warmup`) | 49 |
+| Collection          | Script had a warmup prompt?                         | So the table builder               | n   |
+| ------------------- | --------------------------------------------------- | ---------------------------------- | --- |
+| Ours, 4B (frozen)   | no — predates the warmup we added to `benchmark.py` | drops row 1 (default)              | 49  |
+| Ours, 8B            | yes                                                 | keeps all (`--no-warmup-drop`)     | 50  |
+| Official Domino, 4B | yes — our `benchmark_noar.py` variant               | keeps all (default)                | 50  |
+| Official Domino, 8B | no — Domino's stock `benchmark.py`                  | drops row 1 (`--domino-no-warmup`) | 49  |
 
-So your reading of Domino is right: **the released Domino benchmark has no warmup prompt of
-its own.** The 4B row is warm because we ran it through a variant with one inserted; the 8B
-row was collected with the stock script, so its first prompt is dropped instead.
+Note that **the released Domino benchmark has no warmup prompt of its own.** The 4B row is
+warm because we ran it through a variant with one inserted; the 8B row was collected with
+the stock script, so its first prompt is dropped instead.
 
 A fresh 4B run today needs neither flag — `benchmark.py` warms up on its own. The exclusion
 stays in the published command so it reproduces the paper exactly instead of silently
