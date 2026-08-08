@@ -11,19 +11,19 @@ methods each.
 > Use the scripts below when you want to **re-measure** on your own hardware; use
 > `results/serving/` when you want to **check our arithmetic**.
 
-| Directory | Measures | Paper |
-|---|---|---|
-| [`bs1/`](bs1/) | single-request (bs=1) throughput + acceptance length, 8 datasets × 3 temperatures | single-stream serving table |
-| [`concurrency/`](concurrency/) | goodput as offered concurrency rises, on full datasets | concurrency table |
-| [`helmet/`](helmet/) | acceptance + throughput as input context grows, on HELMET | long-context table |
+| Directory                      | Measures                                                                          | Paper                       |
+| ------------------------------ | --------------------------------------------------------------------------------- | --------------------------- |
+| [`bs1/`](bs1/)                 | single-request (bs=1) throughput + acceptance length, 8 datasets × 3 temperatures | single-stream serving table |
+| [`concurrency/`](concurrency/) | goodput as offered concurrency rises, on full datasets                            | concurrency table           |
+| [`helmet/`](helmet/)           | acceptance + throughput as input context grows, on HELMET                         | long-context table          |
 
-| method | what runs |
-|---|---|
-| `ar` | target only, no speculation (τ = 1 floor) |
-| `dflash` | DFlash block-diffusion chain drafter |
-| `eagle3` | EAGLE-3 |
-| `domino_chain` | the Domino drafter, chain verify |
-| `dominotree` | **DominoTree** — the conditional draft tree (this repo) |
+| Method         | What runs                                               |
+| -------------- | ------------------------------------------------------- |
+| `ar`           | target only, no speculation (τ = 1 floor)               |
+| `dflash`       | DFlash block-diffusion chain drafter                    |
+| `eagle3`       | EAGLE-3                                                 |
+| `domino_chain` | the Domino drafter, chain verify                        |
+| `dominotree`   | **DominoTree** — the conditional draft tree (this repo) |
 
 ## Prerequisites
 
@@ -58,8 +58,8 @@ Two consequences when you read concurrency results:
 1. **Compare methods only at concurrencies within every compared method's cap.**
    Past its cap a method is running its cap, not the offered load; its goodput
    plateaus, and the gap you measure is admission capacity, not per-step cost.
-2. **Report the cap alongside the number.** It is a property of the method *on that
-   hardware*, and it moves as GPU memory changes.
+2. **Report the cap alongside the number.** It is a property of the method _on that
+   hardware_, and it moves as GPU memory changes.
 
 See [`concurrency/README.md`](concurrency/README.md) for how to find each method's cap
 and for the caps used in the paper.
@@ -79,7 +79,7 @@ first things to revisit on different hardware:
 - **The admission caps** in `concurrency/README.md` are 16 GB-card numbers. On an 80 GB
   card every method will admit far more, the caps may stop binding entirely within
   `c ≤ 32`, and the concurrency crossover we report moves right or disappears. Run
-  `concurrency/find_caps.sh` and use *your* caps; do not inherit ours.
+  `concurrency/find_caps.sh` and use _your_ caps; do not inherit ours.
 
 Anything hardware-independent — the fairness rule, the τ ordering, losslessness, the
 methodology — carries over unchanged.

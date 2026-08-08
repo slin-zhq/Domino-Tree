@@ -1,6 +1,6 @@
 # Concurrency (goodput) benchmark
 
-Measures **aggregate output tokens/s** as the *offered* concurrency rises, for the five
+Measures **aggregate output tokens/s** as the _offered_ concurrency rises, for the five
 methods listed in [`../README.md`](../README.md), over the first-N prompts of real
 datasets (GSM8K 128, MBPP 128, MT-Bench 80) — the same shape as Domino's own serving
 tables, so the numbers are directly comparable.
@@ -13,7 +13,7 @@ from the bs=1 driver's loader, so they are byte-identical to the bs=1 benchmark'
 ## Read this before interpreting the numbers
 
 `c` is the **offered** concurrency — how many requests the client keeps in flight.
-`--max-running-requests` (the *cap*) bounds how many the server runs
+`--max-running-requests` (the _cap_) bounds how many the server runs
 **simultaneously**; the rest queue. Each method sustains a different cap on a given
 GPU: a draft model costs weights plus its own KV, and tree verify additionally
 materializes a `batch × draft × vocab` logits buffer, so on a memory-constrained card
@@ -26,7 +26,7 @@ Therefore:
 - **Past a method's cap**, its goodput plateaus because it is running its cap rather
   than the offered load. Differences there measure **admission capacity on your
   hardware**, not per-step cost. A telltale sign is a flat tail (e.g. `1142 → 1144 →
-  1151` across c = 8, 16, 32).
+1151` across c = 8, 16, 32).
 - **The cap is part of the result.** `run_conc_all.sh` records it in
   `status_<method>.txt`; report it with the numbers.
 
@@ -46,10 +46,10 @@ first cap that survives. Repeat per method.
 
 For reference, the paper's caps on **2×16 GB cards** (RTX 5080) were:
 
-| | AR | EAGLE-3 | DFlash | Domino chain | DominoTree |
-|---|---|---|---|---|---|
-| Qwen3-4B, TP=1 | 32 | 32 | 32 | 16 | 12 |
-| Qwen3-8B, TP=2 | 32 | 16 | 16 | 16 | 8 |
+|                | AR  | EAGLE-3 | DFlash | Domino chain | DominoTree |
+| -------------- | --- | ------- | ------ | ------------ | ---------- |
+| Qwen3-4B, TP=1 | 32  | 32      | 32     | 16           | 12         |
+| Qwen3-8B, TP=2 | 32  | 16      | 16     | 16           | 8          |
 
 These are small-card numbers (16 GB). On a larger GPU expect all of them to rise --
 possibly past 32, in which case no method's cap binds inside the default sweep and every
@@ -87,6 +87,6 @@ One JSONL row per `(method, dataset, concurrency)` at `out/<model>/<method>/<met
  wall_s, completion_tokens, max_new_tokens, ...}
 ```
 
-plus a human-readable `.md` per method. The paper's "Overall" is the **unweighted**
+and a summary table as `<method>.md` alongside it. The paper's "Overall" is the **unweighted**
 mean across the three datasets at each concurrency, so datasets contribute equally
 despite unequal prompt counts.

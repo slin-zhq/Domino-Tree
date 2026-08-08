@@ -40,11 +40,11 @@ rather than merely quoted. Long context ships both.
 
 ## Which file backs which table
 
-| Paper table | Data | Aggregator |
-|---|---|---|
-| bs=1 Overall + per-dataset appendix | `bs1/{4b,8b}/` | `benchmark.py` conventions; per-cell `tps` / `mean_accept` in each JSONL |
-| Concurrency goodput + appendix | `concurrency/{4b,8b}/` | `aggregate_concurrency.py <dir> --label 4B` |
-| Long context + appendix | `longcontext/{4b,8b}/` | `aggregate_helmet.py --root <dir> --model qwen3-4b` |
+| Paper table                         | Data                   | Aggregator                                                               |
+| ----------------------------------- | ---------------------- | ------------------------------------------------------------------------ |
+| bs=1 Overall + per-dataset appendix | `bs1/{4b,8b}/`         | `benchmark.py` conventions; per-cell `tps` / `mean_accept` in each JSONL |
+| Concurrency goodput + appendix      | `concurrency/{4b,8b}/` | `aggregate_concurrency.py <dir> --label 4B`                              |
+| Long context + appendix             | `longcontext/{4b,8b}/` | `aggregate_helmet.py --root <dir> --model qwen3-4b`                      |
 
 Reproduce the published long-context table:
 
@@ -74,10 +74,10 @@ python3 results/serving/aggregate_concurrency.py results/serving/concurrency/8b 
   only where `c` ≤ **every** method's cap. The caps are recorded in
   `concurrency/<size>/<method>/status_<method>.done` and printed by the verifier:
 
-  | | AR | EAGLE-3 | DFlash | Domino chain | DominoTree |
-  |---|---|---|---|---|---|
-  | 4B | 32 | 32 | 32 | 16 | 12 |
-  | 8B | 32 | 16 | 16 | 16 | 8 |
+  |     | AR  | EAGLE-3 | DFlash | Domino chain | DominoTree |
+  | --- | --- | ------- | ------ | ------------ | ---------- |
+  | 4B  | 32  | 32      | 32     | 16           | 12         |
+  | 8B  | 32  | 16      | 16     | 16           | 8          |
 
   Matched-admission region = `c ≤ 8`. That is why the paper's main table stops there and
   the full sweep to `c = 32` sits in the appendix, labeled as an admission ceiling.
@@ -105,7 +105,7 @@ collection timestamp, the SGLang version, and the serving configuration.
 (`--mem-fraction-static 0.80`, no `--cuda-graph-backend-prefill` flag). An earlier pass had
 disabled the prefill graph — an opt-out we needed because the Domino chain hit an OOM with
 it enabled at `0.85`. That flag's measured effect is ~0% (mean paired residual −0.06%), and
-it biased results *against* us rather than for us, since throughput is measured over the
+it biased results _against_ us rather than for us, since throughput is measured over the
 full request round trip so prefill time sits in both sides of every ratio. We recollected
 anyway so that every published number is the **stock** configuration.
 
@@ -122,10 +122,10 @@ cd results/serving && shasum -a 256 -c MANIFEST.sha256 | grep -v ': OK$'   # sil
 The three axes were collected at different times with different naming. The layout above
 is uniform; two 4B bs=1 directories were renamed on export:
 
-| Original collection dir | Published as |
-|---|---|
-| `bs1/chain_cudagraph` | `bs1/4b/domino_chain` |
-| `bs1/dominotree_frontiergraph` | `bs1/4b/dominotree` |
+| Original collection dir        | Published as          |
+| ------------------------------ | --------------------- |
+| `bs1/chain_cudagraph`          | `bs1/4b/domino_chain` |
+| `bs1/dominotree_frontiergraph` | `bs1/4b/dominotree`   |
 
 The suffixes recorded the CUDA-graph configuration at a time when it was still being
 varied; both are the final published configuration, in which **every** method runs at its
@@ -134,7 +134,7 @@ bytes as shipped.
 
 ---
 
-*The served Domino chain is the official Domino drafter running through **our** plugin,
+_The served Domino chain is the official Domino drafter running through **our** plugin,
 not the released Domino fork's own serving path — see the paper's Limitations. That makes
 it the tightest available tree-vs-chain control (identical weights, engine, and flags; only
-the algorithm differs) and we state it plainly rather than implying a fork comparison.*
+the algorithm differs) and we state it plainly rather than implying a fork comparison._

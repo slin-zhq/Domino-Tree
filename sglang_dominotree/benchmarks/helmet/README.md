@@ -5,18 +5,19 @@ and single-request (bs=1) goodput as **input context length grows**, on
 [HELMET](https://github.com/princeton-nlp/HELMET) (Yen et al., ICLR 2025,
 [arXiv:2410.02694](https://arxiv.org/abs/2410.02694)), for five serving configs:
 
-| method | what runs |
-|---|---|
-| `ar` | target only, no speculation (τ = 1 floor) |
-| `dflash` | DFlash block-diffusion chain drafter |
-| `eagle3` | EAGLE-3 |
-| `domino_chain` | the Domino drafter, chain verify |
-| `dominotree` | **DominoTree** — the conditional draft tree (this repo) |
+| method         | what runs                                               |
+| -------------- | ------------------------------------------------------- |
+| `ar`           | target only, no speculation (τ = 1 floor)               |
+| `dflash`       | DFlash block-diffusion chain drafter                    |
+| `eagle3`       | EAGLE-3                                                 |
+| `domino_chain` | the Domino drafter, chain verify                        |
+| `dominotree`   | **DominoTree** — the conditional draft tree (this repo) |
 
 All five share identical serving flags, so any τ/throughput difference reflects the
 speculative method, not the launch config.
 
 ### Why HELMET Summarization specifically
+
 τ is a **decode-side** metric, so it needs tasks with a **long generated output**.
 HELMET's **Summarization** tasks (`infbench_sum`, `multi_lexsum`; generation cap
 1,200 tokens) give the longest decode phase in any long-context benchmark; its
@@ -26,6 +27,7 @@ too few tokens to measure τ and are intentionally excluded. HELMET also nativel
 input length to {8K, 16K, 32K, 64K, 128K}, giving a clean controlled length sweep.
 
 ## Prerequisites
+
 - SGLang with the `dominotree` plugin installed (see the repo root README →
   "Serving on SGLang"); `dflash` / `eagle3` are native SGLang algorithms.
 - The target model and each method's draft model available locally.
@@ -34,7 +36,7 @@ input length to {8K, 16K, 32K, 64K, 128K}, giving a clean controlled length swee
 ## Step 1 — materialise HELMET's own Summarization examples (`helmet_source_dump.py`)
 
 **HELMET's Summarization tasks are not shipped as prebuilt jsonl.** Unlike its
-Recall/RAG/Rerank/Cite families, `infbench_sum` and `multi_lexsum` are loaded *live* by
+Recall/RAG/Rerank/Cite families, `infbench_sum` and `multi_lexsum` are loaded _live_ by
 HELMET's own `data.py` (`load_infbench`, `load_multi_lexsum`) from HF datasets and then
 truncated to a length bin with HELMET's own `truncate_llama2`. Downloading the
 `princeton-nlp/HELMET` dataset repo will **not** give you these files.
@@ -61,6 +63,7 @@ Output: `./helmet_src/<task>_<bin>.jsonl` with a `helmet_prompt` field — HELME
 `user_template.format(**row)`, i.e. context + instruction, not yet chat-templated.
 
 ## Step 2 — apply your model's chat template (`helmet_prep.py`)
+
 Step 1 produced HELMET's own prompt text. This step wraps each one with the **served
 model's** chat template and writes the flat per-cell layout the driver reads,
 `<out-dir>/<task>/<bin>.jsonl`. It re-implements nothing: with `--prompt-field` it takes
@@ -88,6 +91,7 @@ python -c "import json; r=json.loads(open('./prompts/Qwen3-8B/infbench_sum/8192.
 ```
 
 ## Step 3 — run the sweep (`run_helmet_all.sh`, all 5 methods, drain-safe)
+
 ```bash
 MODEL=Qwen/Qwen3-8B TP=2 \
   DRAFT_DOMINO=./Qwen3-8B-Domino-b16 \
@@ -97,6 +101,7 @@ MODEL=Qwen/Qwen3-8B TP=2 \
   setsid bash run_helmet_all.sh > orch.log 2>&1 < /dev/null &
 tail -f orch.log
 ```
+
 - Set `TP=2` for a large model on 2 GPUs; `TP=1` (single GPU) otherwise.
 - **Fast pilot:** add `CLAMP=256 NPR=20` to cap generation and confirm the τ ordering
   and that the longest bin fits, before the full run.
@@ -107,19 +112,23 @@ tail -f orch.log
 - Per-method fit + spec sanity land in `kvpool_<method>.txt`; progress in `orch.log`.
 
 ## Outputs
+
 One JSONL row per (method, task, length_bin):
+
 ```
 {method, model, task, length_bin, tps, mean_accept, n_prompts,
  input_tokens, output_tokens, gen_tokens, ...}
 ```
+
 `mean_accept` is τ; `tps` is bs=1 goodput = sum(completion_tokens)/sum(decode_time).
 Aggregate across methods (τ, throughput, Δ% vs each baseline) with your preferred
 paired-bootstrap analysis over these rows.
 
 ## Notes / honest scope
+
 - **Cite HELMET** — these are its Summarization (and optionally Cite) subtasks at its
   native length bins.
-- **English only.** τ *magnitude* is task-dependent; the robust result is the
+- **English only.** τ _magnitude_ is task-dependent; the robust result is the
   **paired relative** advantage (same drafter, same prompts).
 - The maximum context you can run is bounded by your GPU memory (KV cache), not by
   this harness — a big model at long context needs large / multiple GPUs. State your

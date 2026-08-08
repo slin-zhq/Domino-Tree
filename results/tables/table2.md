@@ -9,7 +9,7 @@ target forward, `commit` is the acceptance check plus KV/output write, and `tota
 Domino-chain's stage split is from a dedicated instrumented run (`results/raw/chain_stage_timing/`),
 because the chain's original code path timed all post-draft work as one fused block.
 
-| Method | draft ms | build ms | verify ms | commit ms | total/round ms | n |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Domino-chain | 3.55 | 2.76 | 19.04 | 0.19 | 25.54 | 422 |
-| DominoTree (16) | 3.53 | 3.67 | 18.65 | 0.70 | 26.54 | 422 |
+| Method          | draft ms | build ms | verify ms | commit ms | total/round ms |   n |
+| --------------- | -------: | -------: | --------: | --------: | -------------: | --: |
+| Domino-chain    |     3.55 |     2.76 |     19.04 |      0.19 |          25.54 | 422 |
+| DominoTree (16) |     3.53 |     3.67 |     18.65 |      0.70 |          26.54 | 422 |

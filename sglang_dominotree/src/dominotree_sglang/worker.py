@@ -24,7 +24,7 @@ of the call, temporarily:
 
 Both are restored in ``finally``. In the DFLASH decode path,
 ``draft_model_runner.forward`` and ``_greedy_sample_from_vocab_parallel_head``
-are each called exactly once, so the capture is unambiguous. See PORT_NOTES.md.
+are each called exactly once, so the capture is unambiguous. See README.md.
 """
 
 from __future__ import annotations
@@ -358,8 +358,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
 
     P4: the tree verify now runs under the decode CUDA graph (the DOMINOTREE
     spec_class enables the custom-mask DFLASH verify graph in handle_server_args),
-    so ``--disable-cuda-graph`` is OPTIONAL — kept as an eager fallback. See
-    PORT_NOTES.md.
+    so ``--disable-cuda-graph`` is OPTIONAL — kept as an eager fallback.
 
     P5 (correctness gate): unsupported configs FAIL FAST instead of running
     silently (page_size!=1, compact draft cache, Mamba/hybrid target at

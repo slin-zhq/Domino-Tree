@@ -1,19 +1,21 @@
 """DominoTree SGLang plugin.
 
-Phase 1: register the Domino block-parallel drafter (GRU correction head, CHAIN
-verify) as an out-of-tree speculative algorithm named ``DOMINO`` on latest
-upstream SGLang, reusing all of upstream's DFLASH plumbing.
+Registers two out-of-tree speculative algorithms on upstream SGLang, reusing all
+of upstream's DFLASH plumbing:
+
+  ``DOMINO``      the Domino block-parallel drafter (GRU correction head) with
+                  CHAIN verify;
+  ``DOMINOTREE``  the conditional best-first draft tree, verified with SGLang's
+                  EAGLE tree-verify.
 
 Entry point (declared in pyproject.toml)::
 
     [project.entry-points."sglang.srt.plugins"]
     dominotree = "dominotree_sglang:register_plugin"
 
-Load it at launch with ``SGLANG_PLUGINS=dominotree`` and select it with
-``--speculative-algorithm DOMINO``. See PORT_NOTES.md for the exact command.
-
-``DOMINOTREE`` (the conditional draft tree) is Phase 3 and is intentionally NOT
-registered here.
+Load it at launch with ``SGLANG_PLUGINS=dominotree`` and select an algorithm with
+``--speculative-algorithm DOMINOTREE`` (or ``DOMINO``). See README.md for the
+full launch command.
 """
 
 from __future__ import annotations
