@@ -161,11 +161,29 @@ It writes **your** data to `results/raw_repro/` and **your** tables to
 overwrite ours. The DFlash / DDTree / CaDDTree reference rows are not re-collected;
 they ship frozen and are linked into your collection so the tables still build.
 
-Two details it handles for you, both easy to get wrong by hand: Domino's released
-benchmark has no warmup prompt, so the pipeline patches a **copy** of it to add one
-(matching how the published 4B baseline was measured — Domino's own source is never
-modified), and Domino is normalized by the lean common AR rather than its own
-`spec_generate(block_size=1)`. Both are explained inline in the script.
+**Domino runs as released.** The pipeline invokes Domino's own `benchmark.py` unmodified,
+at the pinned commit `e4aad4851` (override with `DOMINO_COMMIT`; the run reports whether
+your checkout contains it and records the actual SHA in `run_manifest.json`). Domino's
+benchmark runs no warmup of its own, so its **first prompt is cold** — the pipeline
+handles that in *analysis*, passing `--domino-no-warmup` so that prompt is dropped, rather
+than editing their timing loop. If a future Domino adds a warmup, the run detects it, keeps
+every prompt, and says so; force either behaviour with `DOMINO_HAS_WARMUP=0|1`.
+
+The other thing it gets right for you: Domino is normalized by the lean common AR, not by
+its own `spec_generate(block_size=1)` — see the normalization note further down.
+
+> **On reproducing the published 4B Domino row exactly.** You will not, quite, and that is
+> expected. The published 4B baseline was collected the other way round — a warmup patched
+> into Domino's benchmark, keeping all 50 prompts — while this pipeline runs their
+> benchmark untouched and drops the cold prompt, leaving 49. Both conventions measure only
+> warm prompts and neither is biased; they differ in sample composition, so expect
+> agreement within sampling noise rather than to the decimal. The published 8B baseline
+> already used the convention this pipeline uses.
+>
+> `FAST_DOMINO=1` is available and skips Domino's b=1 AR arm, which is roughly 7–9× the
+> cost of the b=16 arm actually reported and which no published number reads (we never
+> normalize by Domino's AR). It works on a copy, removes only that arm, and touches no
+> timing path — but the default runs Domino completely unpatched.
 
 ## SGLang serving
 
