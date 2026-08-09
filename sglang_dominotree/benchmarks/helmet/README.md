@@ -98,9 +98,21 @@ MODEL=Qwen/Qwen3-8B TP=2 \
   DRAFT_EAGLE3=./Qwen3-8B_eagle3 \
   PROMPTS=./prompts/Qwen3-8B NPR=50 \
   setsid bash run_helmet_all.sh > orch.log 2>&1 < /dev/null &
-tail -f orch.log
+tail -F orch.log
 ```
 
+- **`DRAFT_DOMINO` / `DRAFT_DFLASH` / `DRAFT_EAGLE3` must point at where you actually put
+  each checkpoint** (see the table in [`../README.md`](../README.md)) — the `./Qwen3-8B-...`
+  above is a placeholder, not a literal path that exists by default. A path that does not
+  resolve to a real local directory fails **inside SGLang**, not in this script, with a
+  misleading `HFValidationError: Repo id must use alphanumeric chars...` — that error
+  means "this path was not found locally, so it was treated as a Hub repo id and
+  rejected," not a bug in the launcher. Use the real absolute path (e.g.
+  `~/models/Qwen3-8B-Domino-b16`) unless you actually symlinked the checkpoint into this
+  directory.
+- Use `tail -F` (capital, retries) rather than `-f`: `orch.log` is created by the
+  backgrounded job a moment *after* `[1] <pid>` prints, so a plain `tail -f` run
+  immediately after can lose that race and exit with "No such file or directory."
 - Set `TP=2` for a large model on 2 GPUs; `TP=1` (single GPU) otherwise.
 - **Fast pilot:** add `CLAMP=256 NPR=20` to cap generation and confirm the τ ordering
   and that the longest bin fits, before the full run.

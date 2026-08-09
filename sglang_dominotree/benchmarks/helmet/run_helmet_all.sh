@@ -21,7 +21,7 @@
 #   CLAMP      cap generation (cost knob)      default empty (faithful HELMET cap)
 #   METHODS    default "dominotree domino_chain dflash eagle3 ar"
 #
-# Usage (detach the whole orchestrator; monitor via tail -f orch.log):
+# Usage (detach the whole orchestrator; monitor via tail -F orch.log):
 #   MODEL=Qwen/Qwen3-8B TP=2 DRAFT_DOMINO=./Qwen3-8B-Domino-b16 \
 #   DRAFT_DFLASH=./Qwen3-8B-DFlash-b16 DRAFT_EAGLE3=./Qwen3-8B_eagle3 \
 #     setsid bash run_helmet_all.sh > orch.log 2>&1 < /dev/null &

@@ -81,12 +81,21 @@ DRAFT_DOMINO=./Qwen3-8B-Domino-b16 \
 DRAFT_DFLASH=./Qwen3-8B-DFlash-b16 \
 DRAFT_EAGLE3=./Qwen3-8B_eagle3 \
   setsid bash run_conc_all.sh > orch_conc.log 2>&1 < /dev/null &
-tail -f orch_conc.log
+tail -F orch_conc.log
 ```
 
 Knobs: `TASKS`, `CONC` (default `1,2,4,8,16,32`), `MAXNEW` (default 512), `MEMFRAC`,
 `METHODS`, `OUT`. Confirm the log's `sanity spec_accept_length` exceeds 1.0 for every
 speculative method before trusting a run.
+
+**`DRAFT_DOMINO` / `DRAFT_DFLASH` / `DRAFT_EAGLE3`** must point at where you actually put
+each checkpoint — `./Qwen3-8B-...` above is a placeholder. A path that does not exist
+fails **inside SGLang**, not in this script, with a misleading `HFValidationError: Repo
+id must use alphanumeric chars...` (it means "not found locally, so treated as a Hub
+repo id and rejected," not a launcher bug). Use the real absolute path, e.g.
+`~/models/Qwen3-8B-Domino-b16`. Also use `tail -F` (capital), not `-f` — the log file is
+created a moment *after* `[1] <pid>` prints, so `-f` run immediately after can lose that
+race and fail with "No such file or directory."
 
 `bench_concurrency.py --dry-run` exercises the whole driver without a server or a GPU,
 which is a cheap way to check your task/concurrency arguments first.

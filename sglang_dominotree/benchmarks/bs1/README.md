@@ -21,12 +21,21 @@ DRAFT_DOMINO=./Qwen3-4B-Domino-b16 \
 DRAFT_DFLASH=./Qwen3-4B-DFlash-b16 \
 DRAFT_EAGLE3=./Qwen3-4B_eagle3 \
   setsid bash run_bs1_all.sh > orch_bs1.log 2>&1 < /dev/null &
-tail -f orch_bs1.log
+tail -F orch_bs1.log
 ```
 
 For a larger target on 2 GPUs add `TP=2`. Useful knobs: `NSAMPLES` (prompts per
 dataset, default 50), `MAXNEW` (default 2048), `DATASETS`, `TEMPS`, `MEMFRAC`,
 `METHODS`, `OUT`.
+
+**`DRAFT_DOMINO` / `DRAFT_DFLASH` / `DRAFT_EAGLE3`** must point at where you actually put
+each checkpoint (see the table in [`../README.md`](../README.md)) — `./Qwen3-4B-...`
+above is a placeholder. A path that does not exist fails **inside SGLang**, not in this
+script, with a misleading `HFValidationError: Repo id must use alphanumeric chars...`
+(it means "not found locally, so treated as a Hub repo id and rejected," not a launcher
+bug). Use the real absolute path, e.g. `~/models/Qwen3-4B-Domino-b16`.
+Also use `tail -F` (capital), not `-f`: the log file is created a moment *after*
+`[1] <pid>` prints, so `-f` run immediately after can lose that race.
 
 **Quick check before the full run** (~minutes, one dataset, one temperature):
 

@@ -23,7 +23,7 @@
 #   CAP_AR CAP_EAGLE3 CAP_DFLASH CAP_DOMINO_CHAIN CAP_DOMINOTREE   default 32
 #   METHODS   default "ar dominotree domino_chain dflash eagle3"
 #
-# Usage (detach; monitor with tail -f orch_conc.log):
+# Usage (detach; monitor with tail -F orch_conc.log):
 #   MODEL=Qwen/Qwen3-8B TP=2 CAP_DOMINOTREE=8 CAP_DOMINO_CHAIN=16 \
 #   CAP_DFLASH=16 CAP_EAGLE3=16 CAP_AR=32 \
 #   DRAFT_DOMINO=./Qwen3-8B-Domino-b16 DRAFT_DFLASH=./Qwen3-8B-DFlash-b16 \

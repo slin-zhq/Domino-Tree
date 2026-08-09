@@ -24,7 +24,7 @@
 #             kept identical to the runs that produced the paper's numbers)
 #   METHODS   default "dominotree domino_chain dflash eagle3 ar"
 #
-# Usage (detach; monitor with tail -f orch_bs1.log):
+# Usage (detach; monitor with tail -F orch_bs1.log):
 #   MODEL=Qwen/Qwen3-4B DRAFT_DOMINO=./Qwen3-4B-Domino-b16 \
 #   DRAFT_DFLASH=./Qwen3-4B-DFlash-b16 DRAFT_EAGLE3=./Qwen3-4B_eagle3 \
 #     setsid bash run_bs1_all.sh > orch_bs1.log 2>&1 < /dev/null &
