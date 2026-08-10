@@ -67,6 +67,12 @@ WITH_ABLATION="${WITH_ABLATION:-0}"   # 1 => also collect the conditioning ablat
 #                mode -- methodology always comes from Domino's code as released.
 FAST_DOMINO="${FAST_DOMINO:-0}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# OUT must be ABSOLUTE. run_domino cd's into Domino's own code directory before invoking
+# their benchmark, so a relative --answer-file would resolve against THEIR tree: the
+# collection would silently land in the Domino checkout, the table build would find
+# nothing, and the "already done, skip it" check would test a path that never fills in --
+# so every re-run would redo the expensive half. (Observed exactly this on 2026-08-10.)
+case "${OUT}" in /*) ;; *) OUT="${HERE}/${OUT}" ;; esac
 
 # ---- GPU auto-detect (single GPU) -------------------------------------------
 if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
@@ -266,27 +272,38 @@ for T in "${TEMPS[@]}"; do
   done
 done
 
-# ---- Stage 3: build whatever tables the collected data supports -------------
-# make_latex_table expects a complete grid and raises on the first missing cell, which
-# after a partial collection reads as a crash rather than "you have not collected that
-# yet". Say which cells are missing, then let it run.
+# ---- Stage 3: build the tables, if the grid is actually complete -------------
+# The tables are defined over the FULL dataset list (make_latex_table.DATASETS) -- its
+# columns and its Math/Code/Chat/Overall groups all assume it. Checking only the datasets
+# THIS run collected is not enough: a subset run (say DATASETS=gsm8k) would pass that check
+# and then crash inside the table builder on the first dataset it never collected, which
+# reads as a broken script rather than an incomplete collection. So compare against the
+# builder's own list, read from the builder itself so the two cannot drift apart.
+ALL_DATASETS=$("${PY}" -c "import sys; sys.path.insert(0, '${HERE}'); import make_latex_table as m; print(' '.join(m.DATASETS))" 2>/dev/null)
+[ -n "${ALL_DATASETS}" ] || ALL_DATASETS="${DATASETS[*]}"
+ALL_TEMPS="0.0 0.5 1.0"
+
 missing_cells=""
-for T in "${TEMPS[@]}"; do
-  for ds in "${DATASETS[@]}"; do
+for T in ${ALL_TEMPS}; do
+  for ds in ${ALL_DATASETS}; do
     [ -f "${OUT}/dominotree/${ds}_T${T}.jsonl" ] || missing_cells="${missing_cells} ${ds}_T${T}"
   done
 done
-if [ -n "${missing_cells}" ]; then
-  echo "[warn] not all cells were collected; the table build will stop at the first gap."
-  echo "[warn] missing DominoTree cells:${missing_cells}"
-  echo "[warn] re-run this script to retry them -- finished cells are skipped, so it resumes."
-fi
 
 TABLES_OUT="${TABLES_OUT:-${HERE}/results/tables_repro}"
-echo "[$(ts)] building tables (surgical AR normalization) -> ${TABLES_OUT}"
-"${PY}" "${HERE}/make_latex_table.py" --raw-dir "${OUT}" --out-dir "${TABLES_OUT}" --ar-norm surgical \
-  --domino-model-dir "${DOMINO_MODEL_DIR}" ${DOMINO_WARMUP_FLAG} \
-  --temps "$(IFS=,; echo "${TEMPS[*]}")" || echo "[warn] table build reported issues (see above)"
+if [ -n "${missing_cells}" ]; then
+  echo "[$(ts)] SKIPPING the table build -- the collection is incomplete, which is expected if you"
+  echo "        restricted DATASETS/TEMPS (for example a smoke run)."
+  echo "        The paper tables are defined over the full grid (${ALL_DATASETS} x ${ALL_TEMPS}),"
+  echo "        so a partial one cannot fill them in; Overall/Math/Code/Chat would be misleading."
+  echo "        Missing DominoTree cells:${missing_cells}"
+  echo "        Re-run with the full defaults to finish -- completed cells are skipped, so it resumes."
+else
+  echo "[$(ts)] building tables (surgical AR normalization) -> ${TABLES_OUT}"
+  "${PY}" "${HERE}/make_latex_table.py" --raw-dir "${OUT}" --out-dir "${TABLES_OUT}" --ar-norm surgical \
+    --domino-model-dir "${DOMINO_MODEL_DIR}" ${DOMINO_WARMUP_FLAG} \
+    --temps "$(IFS=,; echo "${TEMPS[*]}")" || echo "[warn] table build reported issues (see above)"
+fi
 echo "[$(ts)] done."
 echo "  your tables : ${TABLES_OUT}/       (ours ship in results/tables_gpunative/ -- compare, do not overwrite)"
 echo "  your raw    : ${OUT}/"
