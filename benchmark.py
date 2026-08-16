@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         default="chain,marg,dominotree",
-        help="Subset of {ar,chain,marg,dominotree}; dominotree is the conditional draft tree (this paper's method), marg is the marginal-tree DDTree-analogue.",
+        help="Subset of {ar,chain,marg,condstatic,dominotree}. dominotree = conditional draft tree (this paper's method); marg = marginal-tree DDTree-analogue (no correction); condstatic = correction applied ONCE per depth along the greedy path, then shared (isolates path-dependence).",
     )
     parser.add_argument("--out", required=True, help="Output JSONL path.")
     parser.add_argument("--smoke", action="store_true")
@@ -83,7 +83,7 @@ def main() -> None:
     args = parse_args()
     budgets = [int(b) for b in args.budgets.split(",") if b.strip()]
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
-    allowed = {"ar", "chain", "marg", "dominotree"}
+    allowed = {"ar", "chain", "marg", "condstatic", "dominotree"}
     unknown = sorted(set(methods) - allowed)
     if unknown:
         raise SystemExit(f"unknown methods: {unknown}; allowed={sorted(allowed)}")
@@ -158,6 +158,24 @@ def main() -> None:
         except Exception as exc:  # pragma: no cover - hardware/deps dependent
             print(f"[gpu-native-build] unavailable ({exc}); falling back to the pure-Python builder")
             graph_expander = None
+
+    graph_static = None
+    if use_gpu_native and "condstatic" in methods:
+        try:
+            graph_static = domino_adapter.GraphStaticCorrector(
+                target=target,
+                draft=draft,
+                k_draft=k_draft,
+                prefix_len=prefix_len,
+                node_topk=args.node_topk,
+                corr_topm=args.corr_topm,
+                device=device,
+            )
+            print(f"[gpu-native-build] static corrector captured (condstatic control): "
+                  f"k_draft={k_draft} node_topk={args.node_topk} corr_topm={args.corr_topm}")
+        except Exception as exc:  # pragma: no cover - hardware/deps dependent
+            print(f"[gpu-native-build] static-corrector capture unavailable ({exc}); using the eager sync-free path")
+            graph_static = None
 
     dataset = load_and_process_dataset(args.dataset)
     if args.max_samples and len(dataset) > args.max_samples:
@@ -256,6 +274,29 @@ def main() -> None:
                         args.node_topk,
                         sample_draft=args.sample_draft,
                         temperature=args.temperature,
+                    )
+                    root_state_for_tree = None
+                elif mode == "condstatic" and graph_static is not None:
+                    # graph-captured static corrector (see GraphStaticCorrector): the
+                    # control is captured for the same reason the method is, so neither
+                    # is penalised by launch overhead the other avoids.
+                    children_fn = graph_static.children_fn(ph, base_logits, root_state)
+                    root_state_for_tree = None
+                elif mode == "condstatic":
+                    # Correction computed ONCE along the greedy path, then shared across
+                    # every node at that depth: corrected but factorized. Isolates
+                    # path-dependence, which `marg` (no correction at all) cannot.
+                    children_fn = domino_adapter.make_static_corrected_children_fn(
+                        target=target,
+                        draft=draft,
+                        ph=ph,
+                        base_logits=base_logits,
+                        k_draft=k_draft,
+                        prefix_len=prefix_len,
+                        node_topk=args.node_topk,
+                        corr_topm=args.corr_topm,
+                        device=device,
+                        root_state=root_state,
                     )
                     root_state_for_tree = None
                 elif graph_expander is not None:

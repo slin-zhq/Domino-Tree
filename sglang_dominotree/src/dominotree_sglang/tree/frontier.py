@@ -26,6 +26,22 @@ Algorithm (per decode step, one call to :meth:`FrontierTreeBuilder.build`):
    dead-leaf-pad short trees, and emit the flat tokens + intra-tree ancestor
    mask as device tensors.
 
+When this builder is and is not the right choice
+------------------------------------------------
+This is a **batching** optimisation, not a universally faster builder. It deliberately
+trades arithmetic for synchronisation: it scores ``D * W`` lane-corrections per request
+per step (240 at our defaults) where the best-first heap scores only the ``B`` nodes it
+actually expands (15) -- roughly 16x the correction work -- in exchange for removing the
+heap's per-pop device-to-host sync.
+
+That trade pays under continuous batching, where those syncs serialise across every
+in-flight request and idle the GPU between pops. It does **not** obviously pay at batch
+size 1, where there is no batch to serialise and a per-node CUDA graph already makes the
+syncs cheap; there the extra arithmetic is close to pure cost. This is why the paper's
+single-stream (bs=1) results use the heap builder with the GPU-native per-node expander
+(``dominotree_gpu.GraphNodeExpander``) and the served results use this one: each regime
+runs the builder suited to it, and neither choice is an oversight.
+
 Correctness — the monotone-score lemma (``batch_builder_design.md`` §2 intro):
 a child's cumulative log-prob is <= its parent's, so ``build_best_first_tree``
 pops exactly the global top-B nodes of the candidate tree, and that set is
