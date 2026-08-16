@@ -1,0 +1,30 @@
+Pairing check — the DDTree reference implementation on a Domino checkpoint
+==========================================================================
+date       2026-08-17, MIRLab GPU 0 (RTX 5080)
+code       CaDDTree reference repo @ a88f3f3 (benchmark_caddtree.py), unmodified
+env        .venv_ddtree (torch 2.12.0+cu130, flash_attn 2.8.3)
+command    benchmark_caddtree.py --model-name-or-path Qwen3-4B \
+             --draft-name-or-path Qwen3-4B-Domino-b16 --dataset gsm8k \
+             --max-samples 3 --max-new-tokens 256 --temperature 0.0 \
+             --tree-budget 16 --skip-baseline
+
+WHY: the repo README states that pairing DDTree with the Domino drafter degrades
+silently rather than erroring. That claim was previously unsourced, so we measured it.
+
+RESULT
+  dflash        tau = 1.01   (18.53 ms/tok, 248.3 rounds)
+  ddtree_tb16   tau = 1.01   (18.90 ms/tok, 246.3 rounds)
+
+  i.e. essentially no accepted tokens beyond the first. For comparison, the SAME
+  scoring rule implemented with Domino's shift_label convention handled correctly --
+  the marg@16 arm in ../matched_builder/ -- reaches tau = 9.35 on the same dataset
+  and the same checkpoint.
+
+MECHANISM: `shift_label` does not appear anywhere in the CaDDTree/DDTree codebase, so
+that loader cannot honour Domino's convention and takes the wrong per-position hidden
+state. The run also prints an `UNEXPECTED` weight-loading note, which is the only
+surface signal that anything is wrong.
+
+CAVEAT: n=3 prompts, 256 max new tokens, GSM8K only -- deliberately small, since the
+effect is an order of magnitude and does not need precision. The README previously
+quoted "about 1.04" from an unrecorded run; the text now cites this measurement.

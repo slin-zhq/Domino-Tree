@@ -309,9 +309,16 @@ baselines, measured inside SGLang — see
 The AR / DFlash / DDTree / CaDDTree numbers come from benchmarking with the official
 [CaDDTree repository](https://github.com/ZhangShuai1230/CaDDTree), commit `a88f3f3`, on the
 native DFlash drafter `Qwen3-4B-DFlash-b16`. Domino and DominoTree use the Domino drafter.
-Each method must be paired with its own drafter: the two checkpoints are interchangeable in
-shape, so running DDTree against the Domino draft silently ignores Domino's `shift_label`
-correction and completes with a degenerate tau of about 1.04.
+Each method must be paired with its own drafter. The two checkpoints are interchangeable in
+*shape*, so the pairing mistake does not raise an error -- it degrades silently. The
+CaDDTree/DDTree reference code has no notion of Domino's `shift_label` convention (the
+identifier does not appear in that codebase), so pointing it at a Domino checkpoint takes
+the wrong per-position hidden-state slice and speculation collapses: we measure
+**tau = 1.01** for both `dflash` and `ddtree_tb16` on GSM8K, i.e. essentially no accepted
+tokens beyond the first, against **tau = 9.35** for the same scoring rule implemented
+correctly on the same checkpoint (the `marg@16` arm in
+[`results/conditioning_ladder/`](results/conditioning_ladder/)). Verified 2026-08-17 on
+an RTX 5080; the run also emits an `UNEXPECTED` weight-loading warning.
 
 The Domino baseline is the released Domino decoder ([`jianuo-huang/Domino`](https://github.com/jianuo-huang/Domino),
 commit `e4aad4851`), run through its own benchmark, `best-of(graph, eager)` per dataset. It
