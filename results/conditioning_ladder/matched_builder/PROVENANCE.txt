@@ -1,0 +1,41 @@
+Conditioning ladder — three-point decomposition of DominoTree's gain
+====================================================================
+collected      2026-08-16, MIRLab GPU 0 (RTX 5080), Qwen3-4B + Qwen3-4B-Domino-b16
+protocol       8 datasets x n=50 prompts, T=0, max_new_tokens=2048, budget 16,
+               corr_topm 64, node_topk 8
+methods        ar, marg@16, condstatic@16, dominotree@16
+builder        --python-builder for ALL arms (builder-MATCHED; see note)
+driver         benchmark.py (Domino-Tree repo), run via ~/ladder/run_ladder.sh
+
+WHY THIS EXISTS
+  The published ablation (tab:c3) compares marg@16 vs dominotree@16, which ablates TWO
+  things at once: having the GRU correction at all, and recomputing it per realized path.
+  The paper's claim is about the second. condstatic@16 is the missing middle arm:
+  the correction is computed ONCE per depth along the greedy path and then shared, so it
+  is corrected but path-INDEPENDENT. marg -> condstatic -> dominotree separates the two.
+
+BUILDER FAIRNESS
+  All arms run --python-builder. Measured per-round build cost is 1.76 / 3.45 / 3.58 ms
+  for marg / condstatic / dominotree, i.e. the two conditional arms are within 4% of each
+  other, so the comparison is not biased by builder implementation. Running each arm at
+  its CUDA-graph best would require new graph-capture code for marg and condstatic
+  (dominotree already has gpu_expander.py) and is deferred; note tau is builder-invariant,
+  so only the throughput ladder could move.
+
+RESULT (unweighted mean over the 8 datasets)
+  arm              tau     speedup-over-AR
+  marg@16          6.924   4.11x
+  condstatic@16    7.623   4.21x
+  dominotree@16    7.983   4.38x
+
+  tau : marg -> condstatic +10.1% ; condstatic -> dominotree +4.7% ; total +15.3%
+        => ~66% of the acceptance gain is "having the correction at all",
+           ~31% is path-dependence (the paper's actual novelty).
+  tps : marg -> condstatic  +2.4% ; condstatic -> dominotree +4.0% ; total  +6.6%
+        => path-dependence is worth MORE in throughput than in tau.
+
+  DominoTree is highest on both metrics in all 8 datasets.
+
+REPRODUCE
+  scripts/domino_tree/agg_ladder.py   (the table above)
+  scripts/domino_tree/stage.py        (per-stage build/verify times)
