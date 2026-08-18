@@ -1,0 +1,46 @@
+Conditioning ladder — BEST-IMPLEMENTED builder configuration
+=============================================================
+collected  2026-08-16, MIRLab GPU 0 (RTX 5080), Qwen3-4B + Qwen3-4B-Domino-b16
+protocol   8 datasets x n=50, T=0, max_new_tokens=2048, budget 16, corr_topm 64,
+           node_topk 8; all arms in ONE session against one AR (paired per prompt)
+methods    ar, marg@16, condstatic@16, dominotree@16
+
+BUILDER CONFIGURATION (this is what differs from conditioning_ladder_20260816/)
+  marg@16        Python. Nothing to graph: its children fn returns precomputed
+                 per-depth menus, so per-node work is ~free and its cost is the
+                 (inherently un-graphable) Python best-first heap loop.
+  condstatic@16  CUDA-graph captured (domino_adapter.GraphStaticCorrector). Its whole
+                 D=16 greedy trajectory is a fixed sequence over fixed shapes, so it
+                 captures as ONE graph, replayed once per round.
+  dominotree@16  CUDA-graph captured per node (dominotree_gpu.GraphNodeExpander).
+                 Best-first pop order is data-dependent, so only the per-node
+                 correction can be captured; it replays 15x per round.
+
+MEASURED PER-ROUND BUILD COST (ms)         matched     best-implemented
+  marg@16                                    1.76            1.78
+  condstatic@16                              3.45            1.90
+  dominotree@16                              3.58            2.36
+  (condstatic's matched cost included ~63 host syncs/round that were a defect in our
+   first implementation, since fixed; see the repo history.)
+
+RESULT (unweighted over the 8 datasets; paired stratified bootstrap, B=5000)
+  tau              marg 6.92 -> condstatic 7.62 -> dominotree 7.98
+                   IDENTICAL to the matched run: tau is builder-invariant, which is a
+                   direct check that no builder changes which tree is built.
+                   +10.1% (correction at all) then +4.7% (path-dependence).
+
+  speedup-over-AR  marg 4.13x -> condstatic 4.54x -> dominotree 4.65x
+    condstatic / marg        +9.79% [ +8.46, +10.99]
+    dominotree / condstatic  +2.52% [ +1.59,  +3.53]
+    dominotree / marg       +12.56% [+11.41, +13.71]
+
+HOW TO READ THE TWO CONFIGURATIONS
+  The matched run isolates the SCORING FUNCTION by holding construction cost fixed;
+  it is the ablation proper (path-dependence = +4.05%). This run shows what a deployer
+  gets with each arm at its best (+12.56% total over a marginal tree). The split moves
+  between them because graph capture helps condstatic more than DominoTree -- a
+  path-INDEPENDENT trajectory captures as one graph, while best-first's data-dependent
+  pop order forces one replay per node. Neither configuration is the "true" one; they
+  answer different questions and the paper reports both.
+
+REPRODUCE  scripts/domino_tree/ladder_ci.py <this directory>

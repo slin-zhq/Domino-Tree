@@ -24,6 +24,7 @@ the serving tables (bs=1, concurrency goodput, HELMET long context).
 benchmark.py, dominotree.py, dominotree_gpu.py   the HF research harness
   run_benchmark.sh, run_pipeline.sh              …its drivers
   make_latex_table.py                            …raw JSONL -> the paper's tables
+  make_conditioning_ladder_table.py              …raw JSONL -> the paper's Table 13
 sglang_dominotree/                               the SGLang plugin
   src/dominotree_sglang/                         …algorithm registration + tree builder
   benchmarks/{bs1,concurrency,helmet}/           …the three serving benchmarks
@@ -235,6 +236,15 @@ is rebuilt from the shipped raw JSONL.
   layout and the AR normalization.
 - `results/raw/conditioning_ablation/`, `results/raw/dominotree_python_builder/` — the
   conditioning ablation (Cond@16 vs Marg@16, matched builder).
+- `results/raw/conditioning_ladder/{matched,graphbest}/` — the **three-arm conditioning
+  ladder** behind the paper's Table 13: `marg@16` (no correction) vs `condstatic@16`
+  (correction applied once per depth along the greedy trajectory) vs `dominotree@16`
+  (correction recomputed per node). All arms run against one shared AR in a single session,
+  so the per-prompt pairing is exact. Two independent collections: `matched/` puts every arm
+  on the Python builder, which fixes the implementation but not the construction cost;
+  `graphbest/` puts every arm at its fastest builder, which is what a deployment sees.
+  Each carries a `PROVENANCE.txt` with the exact protocol and per-round build costs.
+  Rebuild with `python3 make_conditioning_ladder_table.py` (stdlib only).
 - `results/serving/` — the SGLang serving raw data, covering the three serving benchmarks
   (single request, goodput under concurrency, HELMET long context), both model sizes
   (Qwen3-4B at TP=1, Qwen3-8B at TP=2), and all five methods compared under identical
@@ -257,6 +267,9 @@ The offline tables regenerate the same way:
 ```bash
 # Qwen3-4B: Table 1, pairwise CIs, conditioning ablation
 python make_latex_table.py --raw-dir results/raw --out-dir results/tables_gpunative
+
+# Table 13: the three-arm conditioning ladder (marg -> cond-static -> dominotree)
+python3 make_conditioning_ladder_table.py
 
 # Qwen3-8B. The two extra flags are the warmup conventions, explained just below.
 python make_latex_table.py --raw-dir results/raw/8b --domino-model-dir qwen3-8b \
