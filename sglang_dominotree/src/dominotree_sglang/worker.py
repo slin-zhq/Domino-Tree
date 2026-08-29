@@ -1277,8 +1277,16 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             intra_mask, seq_lens_cpu=seq_lens_cpu, device=device
         )
 
-        # 5) EAGLE verify input (irregular tree -> tree_topk=-1). spec_steps=n-1
-        # makes max_tree_depth=n so accept_index width == node budget.
+        # 5) EAGLE verify input (irregular tree -> tree_topk=-1).
+        # spec_steps + 1 IS the accept_index row width, so it should be the
+        # longest root-to-leaf chain the tree can actually contain -- which is
+        # bounded by DEPTH, not by the node budget. The builder caps depth at
+        # block_size, so the longest chain is min(n, block_size + 1) vertices
+        # including the root. While the budget equalled block_size these
+        # coincided; once decoupled, n - 1 over-allocates (33 slots for a chain
+        # of at most 17 at budget 32), costing memory traffic on every verify.
+        # No-op at the published config (n == block_size == 16 -> 15 either way),
+        # so this cannot move any published number.
         verify_input = EagleVerifyInput(
             draft_token=draft_tokens_2d.reshape(-1),
             custom_mask=custom_mask,
@@ -1287,7 +1295,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             retrieve_next_token=retrieve_next_token,
             retrieve_next_sibling=retrieve_next_sibling,
             retrieve_cum_len=None,
-            spec_steps=n - 1,
+            spec_steps=min(n, int(self.block_size) + 1) - 1,
             topk=-1,
             draft_token_num=n,
             capture_hidden_mode=CaptureHiddenMode.FULL,
