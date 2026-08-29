@@ -67,6 +67,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--builder",
+        choices=("heap", "frontier"),
+        default="heap",
+        help=(
+            "Tree builder for dominotree. 'heap' (default, and what every published "
+            "number used) is the host-side best-first heap: one pop per node, so build "
+            "cost is LINEAR in --budgets. 'frontier' is the batched depth-synchronous "
+            "builder the SGLang plugin already defaults to (tree/frontier.py, loaded by "
+            "path -- same source, not a copy), whose cost tracks tree depth rather than "
+            "node count. The two produce the same tree up to real-valued score ties, so "
+            "tau is unchanged; only build time differs. Required for an unbiased budget "
+            "sweep, since the heap's cost grows in the very parameter being swept."
+        ),
+    )
+    parser.add_argument(
         "--python-builder",
         action="store_true",
         help=(
@@ -138,7 +153,9 @@ def main() -> None:
     eos = tokenizer.eos_token_id
 
     graph_expander = None
-    if use_gpu_native and "dominotree" in methods:
+    # --builder frontier replaces the per-node expander outright; capturing its
+    # graphs anyway would burn memory and capture time for a path never taken.
+    if use_gpu_native and "dominotree" in methods and args.builder != "frontier":
         try:
             import dominotree_gpu
 
@@ -158,6 +175,31 @@ def main() -> None:
         except Exception as exc:  # pragma: no cover - hardware/deps dependent
             print(f"[gpu-native-build] unavailable ({exc}); falling back to the pure-Python builder")
             graph_expander = None
+
+    # Frontier builders are per-budget (static buffers + one CUDA graph each), so
+    # cache one per budget rather than rebuilding per round.
+    frontier_builders: dict[int, object] = {}
+
+    def get_frontier_builder(budget: int):
+        if budget not in frontier_builders:
+            import dominotree_frontier
+
+            frontier_builders[budget] = dominotree_frontier.FrontierBuilder(
+                draft=draft,
+                embed_tokens=target.get_input_embeddings(),
+                k_draft=k_draft,
+                prefix_len=prefix_len,
+                node_topk=args.node_topk,
+                corr_topm=args.corr_topm,
+                budget=budget,
+                mask_token_id=mask_token_id,
+                device=device,
+            )
+            print(
+                f"[frontier-build] builder ready: budget={budget} k_draft={k_draft} "
+                f"node_topk={args.node_topk} corr_topm={args.corr_topm} prefix_len={prefix_len}"
+            )
+        return frontier_builders[budget]
 
     graph_static = None
     if use_gpu_native and "condstatic" in methods:
@@ -267,7 +309,13 @@ def main() -> None:
                     times[stage] += value
             else:
                 t0 = cuda_t()
-                if mode == "marg":
+                if mode == "dominotree" and args.builder == "frontier":
+                    # The batched builder consumes the round tensors directly; there is
+                    # no per-node children_fn and no heap.
+                    nodes = get_frontier_builder(budget).build(
+                        ph, base_logits, root_state, int(output_ids[0, start].item())
+                    )
+                elif mode == "marg":
                     children_fn = domino_adapter.make_marginal_children_fn(
                         base_logits,
                         k_draft,
@@ -318,7 +366,10 @@ def main() -> None:
                         temperature=args.temperature,
                     )
                     root_state_for_tree = root_state
-                nodes = dominotree.build_best_first_tree(children_fn, root_state_for_tree, budget, k_draft)
+                if not (mode == "dominotree" and args.builder == "frontier"):
+                    nodes = dominotree.build_best_first_tree(
+                        children_fn, root_state_for_tree, budget, k_draft
+                    )
 
                 tree_len = 1 + len(nodes)
                 ids = torch.empty((1, tree_len), dtype=torch.long, device=device)
