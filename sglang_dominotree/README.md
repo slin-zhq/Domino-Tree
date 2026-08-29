@@ -94,6 +94,23 @@ python -m sglang.launch_server \
 (`--tp-size 2` is what the Qwen3-8B results use). Serving is over SGLang's usual
 OpenAI-compatible and `/generate` endpoints, at any temperature.
 
+To run a tree budget of 32 drafted nodes while retaining a 16-position drafter, add the
+environment variable below; do not change the drafter's block-size argument:
+
+```bash
+DOMINOTREE_TREE_BUDGET=32 SGLANG_PLUGINS=dominotree \
+python -m sglang.launch_server \
+  --model-path /path/to/Qwen3-8B \
+  --speculative-algorithm DOMINOTREE \
+  --speculative-draft-model-path /path/to/Qwen3-8B-Domino-b16 \
+  --speculative-num-steps 1 --speculative-eagle-topk 1 \
+  --speculative-num-draft-tokens 16 --tp-size 2 --page-size 1
+```
+
+Here **tree budget** means the number of drafted nodes in the tree. SGLang verifies those
+nodes together with the already-verified root, so budget 32 produces 33 target verify slots;
+the drafter still emits a block of 16 positions and therefore still bounds tree depth.
+
 The defaults are the configuration the paper reports — the zero-sync frontier builder with
 CUDA-graph capture, running under SGLang's decode CUDA graphs. No environment variables are
 needed for it.
@@ -122,6 +139,7 @@ Defaults are the reported configuration; these exist for ablation and reproducib
 | `DOMINOTREE_GPU_BUILDER`    | `1`        | Use the CUDA-graph node expander for the `conditional` builder                                                                                        |
 | `DOMINOTREE_NODE_TOPK`      | `8`        | Branching cap: candidate children considered per expanded node (clamped to `<= DOMINOTREE_CORR_TOPM`)                                                 |
 | `DOMINOTREE_CORR_TOPM`      | `64`       | Candidates the GRU correction is re-run over                                                                                                          |
+| `DOMINOTREE_TREE_BUDGET`    | unset      | Drafted nodes in the tree; unset preserves the released b16 configuration (15 drafted nodes plus the root)                                            |
 
 `DOMINOTREE_CORR_TOPM` is the width knob the paper sweeps (the candidate-width saturation
 table, M ∈ {16, 64, 128, 256, full}). `DOMINOTREE_NODE_TOPK` is held at 8 in every reported

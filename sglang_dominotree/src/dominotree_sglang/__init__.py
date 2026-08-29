@@ -21,6 +21,7 @@ full launch command.
 from __future__ import annotations
 
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,33 @@ def _build_spec_class(algo_name: str = "DOMINO"):
             # in the worker __init__ (scheduler subprocess). Mamba/hybrid targets
             # are guarded in the worker __init__ only (needs the live backend).
             assert_domino_server_args_supported(server_args, algo_name)
+
+            # A tree budget counts drafted non-root nodes. The target verifies
+            # the root plus that budget, while the draft block still bounds depth.
+            if algo_name == "DOMINOTREE":
+                raw_budget = os.environ.get("DOMINOTREE_TREE_BUDGET")
+                if raw_budget is not None:
+                    try:
+                        budget = int(raw_budget)
+                    except ValueError as exc:
+                        raise ValueError(
+                            "DOMINOTREE_TREE_BUDGET must be an integer, "
+                            f"got {raw_budget!r}."
+                        ) from exc
+                    if budget < 1:
+                        raise ValueError(
+                            "DOMINOTREE_TREE_BUDGET must be >= 1, "
+                            f"got {budget}."
+                        )
+                    draft_block_size = int(server_args.speculative_num_draft_tokens)
+                    server_args.speculative_num_draft_tokens = budget + 1
+                    logger.info(
+                        "DOMINOTREE tree budget=%d drafted nodes; target verify "
+                        "slots=%d (root included); draft block_size=%d (depth).",
+                        budget,
+                        budget + 1,
+                        draft_block_size,
+                    )
 
             # Phase 1 runs synchronously (supports_overlap=False). The Domino
             # rollout captures its own CUDA graph and we have not validated it

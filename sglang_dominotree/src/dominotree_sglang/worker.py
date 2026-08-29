@@ -41,6 +41,7 @@ from sglang.srt.speculative.dflash_worker_v2 import DFlashWorkerV2
 from .config import is_dflash_domino_projector
 from .domino_helper import DFlashDominoHelper
 from .domino_rollout import DFlashDominoRollout
+from .sizing import draft_sized_server_args
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,40 @@ def assert_domino_server_args_supported(server_args, algo_name: str) -> None:
                 "so they would be silently ignored at T>0. Use "
                 "--speculative-algorithm DOMINO (chain), which applies them."
             )
+
+
+def _dominotree_draft_block_size(server_args):
+    """Read the draft model's native block size, if available."""
+    if server_args is None:
+        return None
+    path = getattr(server_args, "speculative_draft_model_path", None)
+    if not path:
+        return None
+    try:
+        import json as _json
+
+        from sglang.srt.speculative.dflash_utils import parse_dflash_draft_config
+        from sglang.srt.utils.hf_transformers_utils import get_config
+
+        cfg = get_config(
+            path,
+            trust_remote_code=bool(getattr(server_args, "trust_remote_code", False)),
+            revision=getattr(server_args, "speculative_draft_model_revision", None),
+            model_override_args=_json.loads(
+                getattr(server_args, "json_model_override_args", None) or "{}"
+            ),
+        )
+        block_size = parse_dflash_draft_config(draft_hf_config=cfg).resolve_block_size(
+            default=None
+        )
+        return int(block_size) if block_size else None
+    except Exception:  # pragma: no cover - config layouts vary
+        logger.warning(
+            "DOMINOTREE could not read the drafter's block size; leaving the "
+            "draft-side sizing at the server default.",
+            exc_info=True,
+        )
+        return None
 
 
 class DominoWorkerV2(DFlashWorkerV2):
@@ -372,7 +407,12 @@ class DominoTreeWorkerV2(DominoWorkerV2):
     _algo_name = "DOMINOTREE"
 
     def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+        # The base constructor builds a draft worker from server args. It must
+        # see the drafter's depth, while the target retains budget + root slots.
+        server_args = kwargs.get("server_args") or (args[0] if args else None)
+        draft_block_size = _dominotree_draft_block_size(server_args)
+        with draft_sized_server_args(server_args, draft_block_size) as verify_nodes:
+            super().__init__(*args, **kwargs)
 
         # P5 server-level guard: Mamba/hybrid targets. Upstream's chain verify
         # commits Mamba states after verify (dflash_worker_v2.py:1518-1521), but
@@ -405,10 +445,37 @@ class DominoTreeWorkerV2(DominoWorkerV2):
                 "(chain verify, which handles Mamba upstream)."
             )
 
-        # Verify node budget N == DFLASH block_size, so ALL DFLASH KV/buffer
-        # sizing (reserved per-decode tokens, cuda-graph widths) is reused with
-        # no server-arg override.
-        self.tree_num_nodes = int(self.block_size)
+        # Tree budget is independent of draft depth. Preserve the target verify
+        # width while restoring the draft model's native block size.
+        self.tree_num_nodes = int(
+            verify_nodes if verify_nodes is not None else self.block_size
+        )
+        model_block_size = getattr(self.draft_model, "block_size", None)
+        if model_block_size is None:
+            model_block_size = getattr(
+                getattr(self.draft_model, "config", None), "block_size", None
+            )
+        if model_block_size is not None and int(model_block_size) > 0:
+            self.block_size = int(model_block_size)
+        self.speculative_num_draft_tokens = int(self.tree_num_nodes)
+        if self.tree_num_nodes != int(self.block_size):
+            from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
+            from sglang.srt.speculative.dflash_info import DFlashVerifyInput
+
+            self._draft_block_spec_info = DFlashVerifyInput(
+                draft_token=torch.empty((0,), dtype=torch.long, device=self.device),
+                positions=torch.empty((0,), dtype=torch.int64, device=self.device),
+                draft_token_num=int(self.block_size),
+                custom_mask=None,
+                capture_hidden_mode=CaptureHiddenMode.NULL,
+            )
+            logger.info(
+                "DOMINOTREE tree budget decoupled from block size: "
+                "tree_budget=%d, verify_nodes=%d, block_size=%d (depth).",
+                self.tree_num_nodes - 1,
+                self.tree_num_nodes,
+                self.block_size,
+            )
 
         def _env_int(name, default):
             try:
@@ -850,9 +917,12 @@ class DominoTreeWorkerV2(DominoWorkerV2):
                 device=device,
             )
 
-        # budget = N-1 so root + (N-1) nodes = N (the DFLASH-reserved width).
+        # Budget counts non-root nodes; depth stays draft-block bounded.
         nodes = build_best_first_tree(
-            children_fn, root_state, budget=n - 1, max_depth=n
+            children_fn,
+            root_state,
+            budget=int(self.tree_num_nodes) - 1,
+            max_depth=n,
         )
 
         tokens = [int(verified_scalar)]
@@ -984,7 +1054,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         if shift_label:
             ph_all = draft_hidden  # [bs, N, H]
         else:
-            ph_all = draft_hidden[:, -(n - 1):, :]  # [bs, N-1, H]
+            ph_all = draft_hidden[:, -(int(self.block_size) - 1):, :]
 
         # (2) ONE batched LM-head matmul (was bs separate [k_draft,H]x[H,V]
         # GEMMs); torch.matmul folds [bs,k_draft,H]@[H,V] into a single
@@ -1052,7 +1122,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
                 prefix_len=self.tree_prefix_len,
                 node_topk=self._effective_node_topk(),
                 corr_topm=self.tree_corr_topm,
-                budget=n - 1,
+                budget=int(self.tree_num_nodes) - 1,
                 max_depth=n,
                 mask_token_id=int(self._mask_token_id),
                 device=self.device,
@@ -1107,7 +1177,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         if shift_label:
             ph_all = draft_hidden  # [bs, N, H]
         else:
-            ph_all = draft_hidden[:, -(n - 1):, :]  # [bs, N-1, H]
+            ph_all = draft_hidden[:, -(int(self.block_size) - 1):, :]
 
         weight = target_model.lm_head.weight  # [V,H] full at TP=1; vocab shard at TP>1
         ph_cast = ph_all.to(weight.dtype) if ph_all.dtype != weight.dtype else ph_all
@@ -1156,7 +1226,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         device = self.device
         batch = model_worker_batch
         bs = len(batch.seq_lens)
-        n = int(self.block_size)
+        n = int(self.tree_num_nodes)
         prefix_lens = batch.seq_lens
         draft_input = batch.spec_info
         verified = draft_input.verified_id.view(-1)
