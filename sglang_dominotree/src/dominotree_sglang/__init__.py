@@ -217,7 +217,7 @@ def register_plugin() -> None:
     1. Rebind the ``DFlashDraftModel`` architecture in the model registry to our
        ``DominoDraftModel`` (the Domino checkpoint's architecture string is
        ``"DFlashDraftModel"``, and upstream's class has no GRU head).
-    2. Register the ``DOMINO`` (chain) and ``DOMINOTREE`` (toy tree verify)
+    2. Register the ``DOMINO`` (chain) and ``DOMINOTREE`` (adaptive tree verify)
        speculative algorithms.
     """
     global _registered
@@ -247,7 +247,7 @@ def register_plugin() -> None:
     def _domino_worker_factory(server_args):
         return DominoWorkerV2
 
-    # (3) Register DOMINOTREE (adaptive/toy tree verify). Same DFLASH-draft
+    # (3) Register DOMINOTREE (adaptive tree verify). Same DFLASH-draft
     # gating as DOMINO (is_dflash()=True keeps the DFLASH draft plumbing); the
     # tree verify is driven entirely inside DominoTreeWorkerV2, not gated by the
     # scheduler. A distinct spec_class instance is required (register stores one

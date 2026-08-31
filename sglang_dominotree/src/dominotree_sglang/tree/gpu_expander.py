@@ -467,7 +467,7 @@ def _frontier_equivalence_suite(device: torch.device) -> None:
     from .best_first import build_best_first_tree
     from .conditional_children import make_conditional_children_fn
     from .frontier import FrontierTreeBuilder
-    from .toy_tree import build_intra_tree_mask_from_parents
+    from .masks import build_intra_tree_mask_from_parents
 
     torch.manual_seed(0)
     vocab, hidden, gru_dim, mlp_dim = 89, 12, 10, 24
