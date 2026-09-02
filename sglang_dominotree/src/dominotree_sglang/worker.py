@@ -1046,6 +1046,27 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             n = int(self.block_size)
             shift_label = bool(getattr(self.draft_model, "shift_label", False))
             k_draft = n if shift_label else n - 1
+            # Optional depth cap (frontier path only; the heap fallback is not
+            # the production builder).  The frontier builder's cost is LINEAR in
+            # depth -- bound by ~47 sequential tiny kernels per depth level, not
+            # by arithmetic (STATUS.md D60) -- so capping depth is the only
+            # zero-code lever on build latency.  It trades tau for latency: no
+            # accepted path can exceed max_depth, so this is a MEASURED tradeoff,
+            # never a free win.  Unset => n, i.e. behaviour unchanged.
+            max_depth = n
+            _md = os.environ.get("DOMINOTREE_MAX_DEPTH")
+            if _md:
+                max_depth = int(_md)
+                if not 1 <= max_depth <= n:
+                    raise ValueError(
+                        f"DOMINOTREE_MAX_DEPTH={max_depth} out of range; "
+                        f"expected 1..{n} (the drafter's block size)"
+                    )
+                logger.info(
+                    "DOMINOTREE: tree depth capped at %d (drafter block size "
+                    "%d) via DOMINOTREE_MAX_DEPTH; tau is expected to drop.",
+                    max_depth, n,
+                )
             embed_tokens = self.target_worker.model_runner.model.get_input_embeddings()
             self._frontier_builder = FrontierTreeBuilder(
                 draft=self.draft_model,
@@ -1055,7 +1076,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
                 node_topk=self._effective_node_topk(),
                 corr_topm=self.tree_corr_topm,
                 budget=int(self.tree_num_nodes) - 1,
-                max_depth=n,
+                max_depth=max_depth,
                 mask_token_id=int(self._mask_token_id),
                 device=self.device,
             )
