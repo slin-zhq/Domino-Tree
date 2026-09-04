@@ -278,10 +278,13 @@ class FrontierTreeBuilder:
         # Triton fusion of the per-depth body (see fused_depth.py). Requires the
         # round-1 fusion because it writes the LANE-keyed parent ledger, and the
         # restricted-correction path because the full-vocab scorer has no fused
-        # form. Off by default until the end-to-end tau A/B has gated it.
+        # form. ON by default: it took the build from 1.457 to 0.788 ms and
+        # returned +4.62% end-to-end TPS with tau unchanged (STATUS.md D67).
+        # Set DOMINOTREE_BUILDER_FUSED_DEPTH=0 to restore the torch depth loop
+        # in the SAME build, which is how the A/B was collected.
         self._fused_depth = None
         if (
-            os.environ.get("DOMINOTREE_BUILDER_FUSED_DEPTH", "0") != "0"
+            os.environ.get("DOMINOTREE_BUILDER_FUSED_DEPTH", "1") != "0"
             and self._fusion
             and self.corr_topm > 0
             and self.device.type == "cuda"
