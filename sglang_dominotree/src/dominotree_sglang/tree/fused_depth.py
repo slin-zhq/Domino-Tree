@@ -45,7 +45,11 @@ end-to-end tau A/B -- not a bitwise comparison.
 The kernels are CUDA-graph safe: static shapes, no host syncs, and Triton JIT
 compilation happens during the builder's warmup iterations, before capture.
 
-Selected by ``DOMINOTREE_BUILDER_FUSED_DEPTH`` (default off until gated).
+Gated and ON by default (``DOMINOTREE_BUILDER_FUSED_DEPTH=0`` restores the
+torch depth loop in the same build).  The gate it passed: the CPU and CUDA
+equivalence suites with the full fused stack, kernel engagement verified by
+counting launches, and an end-to-end same-session A/B at 4B/TP=1 showing
++4.62% TPS [+4.43, +4.80] with tau unchanged to +0.01% (STATUS.md D67).
 """
 
 from __future__ import annotations
