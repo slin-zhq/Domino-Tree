@@ -275,6 +275,39 @@ class FrontierTreeBuilder:
         else:
             self._w0_ph = self._w0_lane = None
 
+        # Triton fusion of the per-depth body (see fused_depth.py). Requires the
+        # round-1 fusion because it writes the LANE-keyed parent ledger, and the
+        # restricted-correction path because the full-vocab scorer has no fused
+        # form. Off by default until the end-to-end tau A/B has gated it.
+        self._fused_depth = None
+        if (
+            os.environ.get("DOMINOTREE_BUILDER_FUSED_DEPTH", "0") != "0"
+            and self._fusion
+            and self.corr_topm > 0
+            and self.device.type == "cuda"
+        ):
+            from .fused_depth import FusedDepth
+
+            fd = FusedDepth(
+                W=self.W,
+                E=int(draft.embed_proj[0].out_features),
+                M=self.corr_topm,
+                K=self.node_topk,
+                G=self._gru_dim,
+            )
+            if fd.available and not fd.bind_gru(draft.prefix_gru):
+                logger.warning(
+                    "[DominoTree] fused depth body: unsupported GRU "
+                    "(multi-layer/bidirectional/projected); keeping torch's"
+                )
+                fd.gru_weights = None
+            self._fused_depth = fd if fd.available else None
+            if self._fused_depth is None:
+                logger.warning(
+                    "[DominoTree] fused depth body requested but unavailable "
+                    "(Triton missing?); falling back to the torch depth loop"
+                )
+
         self._states: dict[int, _State] = {}
         # Graphs own the captured allocations; retain their associated static
         # state in the per-bs pool for the lifetime of this builder.
@@ -288,8 +321,10 @@ class FrontierTreeBuilder:
         # Stamp the arm into the log: a bs=1 verdict can turn on ~0.5 ms/step,
         # so "which code produced this number" must never be a guess.
         logger.info(
-            "[DominoTree] frontier builder: fusion=%s graph=%s budget=%d W=%d D=%d",
+            "[DominoTree] frontier builder: fusion=%s fused_depth=%s graph=%s "
+            "budget=%d W=%d D=%d",
             self._fusion,
+            self._fused_depth is not None,
             self._graph_enabled,
             self.budget,
             self.W,
@@ -445,10 +480,32 @@ class FrontierTreeBuilder:
             torch.matmul(st.S_ph[:, :D], self._w0_ph) if self._fusion else None
         )  # [bs, D, E]
 
+        fd = self._fused_depth
         for d in range(D):
             # --- score all W*k children of the frontier (3 correction cases,
             # conditional_children.py:64-92 with a leading [bs, W] batch) ---
-            if d < self.prefix_len:
+            # The fused kernel covers case 2 only; the prefix rows keep the
+            # torch path (there is nothing to fuse -- they are one broadcast).
+            fused_here = fd is not None and d >= self.prefix_len
+            if fused_here:
+                # Case 2, fused: the whole scorer -- broadcast add, SiLU, casts,
+                # w2[cand] gather, bmm, log_softmax, top-k, candidate gather,
+                # cumulative add and all three ledger writes -- in ONE kernel.
+                # Only the lane-half GEMM stays outside, because it is a real
+                # GEMM and cuBLAS should keep it.
+                fd.score(
+                    hpre=torch.matmul(lane_states, self._w0_lane),
+                    ph_half_d=ph_half[:, d],
+                    w2=ep[2].weight,
+                    cand_d=st.S_cand[:, d],
+                    basec_d=st.S_basec[:, d],
+                    lane_scores=lane_scores,
+                    lane_node=lane_node,
+                    led_s_d=led_scores[:, d],
+                    led_t_d=led_tokens[:, d],
+                    led_p_d=led_parent[:, d],
+                )
+            elif d < self.prefix_len:
                 # Case 1: uncorrected prefix rows — path-independent, identical
                 # for every lane.
                 vals = st.S_prefix_lps[:, d].unsqueeze(1).expand(bs, W, k)
@@ -492,35 +549,64 @@ class FrontierTreeBuilder:
                     torch.log_softmax(full, dim=-1), k=k, dim=-1
                 )
 
-            # Cumulative path scores; -inf lanes poison all their descendants.
-            cum = lane_scores.unsqueeze(-1) + vals  # [bs, W, k] float32
-            flat_cum = cum.reshape(bs, wk)
-            flat_tok = toks.reshape(bs, wk)
+            if not fused_here:
+                # Cumulative path scores; -inf lanes poison all their
+                # descendants.
+                cum = lane_scores.unsqueeze(-1) + vals  # [bs, W, k] float32
+                flat_cum = cum.reshape(bs, wk)
+                flat_tok = toks.reshape(bs, wk)
 
-            # --- ledger: log EVERY scored candidate ---
-            led_scores[:, d] = flat_cum
-            led_tokens[:, d] = flat_tok
-            led_parent[:, d] = (
-                lane_node if self._fusion else lane_node.repeat_interleave(k, dim=1)
-            )
+                # --- ledger: log EVERY scored candidate ---
+                led_scores[:, d] = flat_cum
+                led_tokens[:, d] = flat_tok
+                led_parent[:, d] = (
+                    lane_node if self._fusion else lane_node.repeat_interleave(k, dim=1)
+                )
 
             # --- keep top-W per request, GRU-advance the kept lanes ---
             if d + 1 < D:
-                keep_vals, keep_idx = torch.topk(flat_cum, W, dim=1)  # [bs, W]
-                kept_tok = torch.gather(flat_tok, 1, keep_idx)
-                parent_lane = keep_idx // k
-                h0 = torch.gather(
-                    lane_states, 1, parent_lane.unsqueeze(-1).expand(bs, W, G)
-                )
+                if fd is not None:
+                    # topk + token gather + parent-lane divide + lane-state
+                    # gather, fused. Fresh buffers per depth (as before): shapes
+                    # are static, so graph capture owns the allocations.
+                    kept_tok = torch.empty((bs, W), dtype=torch.long, device=dev)
+                    h0 = torch.empty(
+                        (bs, W, G), dtype=lane_states.dtype, device=dev
+                    )
+                    keep_vals = torch.empty(
+                        (bs, W), dtype=torch.float32, device=dev
+                    )
+                    next_node = torch.empty((bs, W), dtype=torch.long, device=dev)
+                    fd.select(
+                        led_s_d=led_scores[:, d],
+                        led_t_d=led_tokens[:, d],
+                        lane_states=lane_states,
+                        h0=h0,
+                        kept_tok=kept_tok,
+                        lane_scores_out=keep_vals,
+                        lane_node_out=next_node,
+                        d_off=d * wk,
+                    )
+                else:
+                    keep_vals, keep_idx = torch.topk(flat_cum, W, dim=1)  # [bs, W]
+                    kept_tok = torch.gather(flat_tok, 1, keep_idx)
+                    parent_lane = keep_idx // k
+                    h0 = torch.gather(
+                        lane_states, 1, parent_lane.unsqueeze(-1).expand(bs, W, G)
+                    )
+                    next_node = d * wk + keep_idx  # global ledger index
                 # One GRU step per kept lane, batched over bs*W (the reference
                 # runs the same module with batch = node_topk per pop).
                 emb = self.embed_tokens(kept_tok)  # [bs, W, E]
-                _, hn = self.draft.prefix_gru(
-                    emb.reshape(bs * W, 1, -1), h0.reshape(1, bs * W, G)
-                )
-                lane_states = hn.reshape(bs, W, G)
+                if fd is not None and fd.gru_weights is not None:
+                    lane_states = fd.gru_cell(emb, h0)
+                else:
+                    _, hn = self.draft.prefix_gru(
+                        emb.reshape(bs * W, 1, -1), h0.reshape(1, bs * W, G)
+                    )
+                    lane_states = hn.reshape(bs, W, G)
                 lane_scores = keep_vals
-                lane_node = d * wk + keep_idx  # global ledger index
+                lane_node = next_node
 
         # --- global top-B over the ledger: selection + topological order in
         # ONE stable descending sort. Flat ledger index is depth-major, so the
