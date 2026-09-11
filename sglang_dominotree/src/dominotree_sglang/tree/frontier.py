@@ -284,7 +284,7 @@ class FrontierTreeBuilder:
         # in the SAME build, which is how the A/B was collected.
         self._fused_depth = None
         if (
-            os.environ.get("DOMINOTREE_BUILDER_FUSED_DEPTH", "1") != "0"
+            os.environ.get("DOMINOTREE_BUILDER_FUSED_DEPTH", "2") != "0"
             and self._fusion
             and self.corr_topm > 0
             and self.device.type == "cuda"
@@ -304,6 +304,32 @@ class FrontierTreeBuilder:
                     "(multi-layer/bidirectional/projected); keeping torch's"
                 )
                 fd.gru_weights = None
+            if fd.version >= 2 and not (
+                fd.gru_weights is not None
+                and fd.bind_lane(draft.embed_proj[0].weight[:, self._hidden :])
+            ):
+                fd.version = 1
+            # Opt-in: precomputed GRU input gates for every token (D74). Costs
+            # ~0.93 GB of VRAM at Qwen3 shapes, which the server can no longer
+            # give to requests -- so it is never on by default.
+            if (
+                fd.version >= 2
+                and os.environ.get("DOMINOTREE_BUILDER_GRU_TABLE", "0") == "1"
+            ):
+                if int(getattr(embed_tokens, "tp_size", 1)) > 1:
+                    # A vocab-parallel embedding is a collective; building a
+                    # full table from one rank's shard would be wrong.
+                    logger.warning(
+                        "[DominoTree] GRU input table needs an unsharded "
+                        "embedding (tp_size=1); not building it"
+                    )
+                else:
+                    rows = int(embed_tokens.weight.shape[0])
+                    nbytes = fd.bind_table(embed_tokens, rows)
+                    logger.info(
+                        "[DominoTree] GRU input table: %d x %d, %.2f GB",
+                        rows, 3 * self._gru_dim, nbytes / 1e9,
+                    )
             self._fused_depth = fd if fd.available else None
             if self._fused_depth is None:
                 logger.warning(
@@ -323,11 +349,14 @@ class FrontierTreeBuilder:
         self._graph_failed = False
         # Stamp the arm into the log: a bs=1 verdict can turn on ~0.5 ms/step,
         # so "which code produced this number" must never be a guess.
+        fdv = self._fused_depth
         logger.info(
-            "[DominoTree] frontier builder: fusion=%s fused_depth=%s graph=%s "
-            "budget=%d W=%d D=%d",
+            "[DominoTree] frontier builder: fusion=%s fused_depth=%s "
+            "depth_body=v%d gru_table=%s graph=%s budget=%d W=%d D=%d",
             self._fusion,
-            self._fused_depth is not None,
+            fdv is not None,
+            fdv.version if fdv is not None else 0,
+            fdv is not None and fdv.gi_table is not None,
             self._graph_enabled,
             self.budget,
             self.W,
@@ -428,17 +457,40 @@ class FrontierTreeBuilder:
         if self.corr_topm > 0:
             # == per-depth torch.topk(base_logits[d], corr_topm) of the
             # reference (same model-dtype rows -> same indices), batched.
-            cand = torch.topk(base_logits, self.corr_topm, dim=-1).indices
+            # topk already returns the values, so re-gathering them was a
+            # second pass over the same elements; copy_ widens bf16 -> fp32
+            # exactly. Bit-identical, two launches fewer.
+            basec, cand = torch.topk(base_logits, self.corr_topm, dim=-1)
             st.S_cand.copy_(cand)
-            st.S_basec.copy_(torch.gather(base_logits, -1, cand).float())
+            st.S_basec.copy_(basec)
         pd = min(self.prefix_len, self.D)
         if pd > 0:
             # == log_prob_topk(base_logits[d], node_topk): path-independent, so
             # once per step is value-identical to the reference's per-node call.
-            logp = torch.log_softmax(base_logits[:, :pd].float(), dim=-1)
-            vals, idx = torch.topk(logp, k=self.node_topk, dim=-1)
-            st.S_prefix_toks.copy_(idx)
-            st.S_prefix_lps.copy_(vals)
+            # ``dtype=`` widens inside the softmax kernel instead of
+            # materializing a [bs, pd, V] fp32 copy first (same values).
+            fd = self._fused_depth
+            if fd is not None and fd.version >= 2 and base_logits.stride(-1) == 1:
+                # D74: same top-k (the candidate topk above), log-sum-exp split
+                # over the vocabulary in two launches instead of a one-SM
+                # softmax + gather + copies.
+                fd.prefix_rows(base_logits=base_logits, pd=pd, st=st)
+                return
+            logp = torch.log_softmax(base_logits[:, :pd], dim=-1, dtype=torch.float32)
+            if self.corr_topm > 0:
+                # log_softmax subtracts one constant per row, so it cannot
+                # reorder the row: its top-k is the logits' top-k, which the
+                # candidate topk above already produced in descending order
+                # (node_topk <= corr_topm by the constructor's clamp). Only an
+                # EXACT bf16 logit tie could be ordered differently -- the same
+                # tie caveat the module docstring states for the whole builder.
+                idx = cand[:, :pd, : self.node_topk]
+                st.S_prefix_toks.copy_(idx)
+                st.S_prefix_lps.copy_(torch.gather(logp, -1, idx))
+            else:
+                vals, idx = torch.topk(logp, k=self.node_topk, dim=-1)
+                st.S_prefix_toks.copy_(idx)
+                st.S_prefix_lps.copy_(vals)
 
     # ------------------------------------------------------------------
     # The depth-synchronous body. Reads only static inputs + model weights,
@@ -484,12 +536,25 @@ class FrontierTreeBuilder:
         )  # [bs, D, E]
 
         fd = self._fused_depth
+        v2 = fd is not None and fd.version >= 2
+        # v2: the ledger index of every lane the frontier keeps, per depth --
+        # the only entries the final top-B can contain when W >= B (see
+        # _final_rank_kernel), so finalization ranks D*W entries, not D*W*k.
+        led_kept = (
+            torch.empty((bs, D, W), dtype=torch.long, device=dev) if v2 else None
+        )
         for d in range(D):
             # --- score all W*k children of the frontier (3 correction cases,
             # conditional_children.py:64-92 with a leading [bs, W] batch) ---
             # The fused kernel covers case 2 only; the prefix rows keep the
             # torch path (there is nothing to fuse -- they are one broadcast).
             fused_here = fd is not None and d >= self.prefix_len
+            advance = d + 1 < D
+            if v2:
+                # v2: ONE GEMM over the current lanes feeds both the scorer
+                # (first E columns) and, when there is a next depth, the GRU's
+                # hidden gates (the rest) -- see FusedDepth.bind_lane.
+                x = fd.lane_gemm(lane_states, with_gru=advance)
             if fused_here:
                 # Case 2, fused: the whole scorer -- broadcast add, SiLU, casts,
                 # w2[cand] gather, bmm, log_softmax, top-k, candidate gather,
@@ -497,7 +562,11 @@ class FrontierTreeBuilder:
                 # Only the lane-half GEMM stays outside, because it is a real
                 # GEMM and cuBLAS should keep it.
                 fd.score(
-                    hpre=torch.matmul(lane_states, self._w0_lane),
+                    hpre=(
+                        x[..., : fd.E]
+                        if v2
+                        else torch.matmul(lane_states, self._w0_lane)
+                    ),
                     ph_half_d=ph_half[:, d],
                     w2=ep[2].weight,
                     cand_d=st.S_cand[:, d],
@@ -567,7 +636,35 @@ class FrontierTreeBuilder:
                 )
 
             # --- keep top-W per request, GRU-advance the kept lanes ---
-            if d + 1 < D:
+            if v2:
+                # Rank-select the best W children (no state copy), then one
+                # GRU kernel that gathers parent rows by index. Runs at the
+                # last depth too, where only the kept indices are used.
+                kept_tok = torch.empty((bs, W), dtype=torch.long, device=dev)
+                keep_vals = torch.empty((bs, W), dtype=torch.float32, device=dev)
+                next_node = led_kept[:, d]
+                parent_lane = torch.empty((bs, W), dtype=torch.long, device=dev)
+                fd.select_rank(
+                    led_s_d=led_scores[:, d],
+                    led_t_d=led_tokens[:, d],
+                    kept_tok=kept_tok,
+                    lane_scores_out=keep_vals,
+                    lane_node_out=next_node,
+                    parent_lane=parent_lane,
+                    d_off=d * wk,
+                )
+                if not advance:
+                    break
+                lane_states = fd.gru_gather(
+                    kept_tok=kept_tok,
+                    parent_lane=parent_lane,
+                    x=x,
+                    lane_states=lane_states,
+                    embed_tokens=self.embed_tokens,
+                )
+                lane_scores = keep_vals
+                lane_node = next_node
+            elif advance:
                 if fd is not None:
                     # topk + token gather + parent-lane divide + lane-state
                     # gather, fused. Fresh buffers per depth (as before): shapes
@@ -617,6 +714,19 @@ class FrontierTreeBuilder:
         # child) always precede children, even on exact score ties; on tie-free
         # inputs the order equals the heap's pop order. ---
         L, B = self.L, self.budget
+        if v2:
+            # D74: ranking IS the stable sort; two launches write every output.
+            fd.finalize(
+                st=st,
+                led_scores=led_scores,
+                led_tokens=led_tokens,
+                led_parent=led_parent,
+                led_kept=led_kept if W >= B else None,
+                D=D,
+                B=B,
+                mask_token_id=self.mask_token_id,
+            )
+            return
         scores_flat = led_scores.reshape(bs, L)
         sorted_scores, order = torch.sort(
             scores_flat, dim=1, descending=True, stable=True
