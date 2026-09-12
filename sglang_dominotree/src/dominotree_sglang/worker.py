@@ -29,6 +29,7 @@ are each called exactly once, so the capture is unambiguous. See README.md.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from typing import Optional
@@ -44,6 +45,14 @@ from .domino_rollout import DFlashDominoRollout
 from .sizing import draft_sized_server_args
 
 logger = logging.getLogger(__name__)
+
+# Zero-cost stand-in for the step-timing context manager when timing is off (the
+# default): one shared object, so a published collection pays nothing per phase.
+_NULL_CTX = contextlib.nullcontext()
+
+
+def _null_phase(_name):
+    return _NULL_CTX
 
 
 def assert_domino_server_args_supported(server_args, algo_name: str) -> None:
@@ -1160,6 +1169,64 @@ class DominoTreeWorkerV2(DominoWorkerV2):
 
     # -- decode + tree verify ---------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Opt-in per-phase step timing (DOMINOTREE_STEP_TIMING=<steps per report>).
+    #
+    # Why this exists: STATUS D77 found an 8B step-time STEP FUNCTION -- 16 verify
+    # slots cost 16.7 ms, 17 slots 20.0 ms, flat to 25 slots, then DOWN at 33 --
+    # that is backend-independent (flashinfer and triton agree) and cannot be the
+    # tree build (0.29 ms). The serving rows only record whole-step decode time,
+    # so the surcharge could not be localised from existing data. This splits the
+    # step into its phases with CUDA events; run two budgets either side of the
+    # cliff and read the per-phase table out of the server log.
+    #
+    # Cost when enabled: two events per phase per step plus ONE synchronize per
+    # report. Default OFF, and never enabled during a published collection.
+    # ------------------------------------------------------------------
+
+    class _StepTimer:
+        def __init__(self, every: int, device) -> None:
+            self.every = int(every)
+            self.device = device
+            self._cur: list = []
+            self._steps: list = []
+
+        class _Phase:
+            def __init__(self, owner, name):
+                self.owner, self.name = owner, name
+
+            def __enter__(self):
+                mod = torch.get_device_module(self.owner.device)
+                self.s, self.e = mod.Event(True), mod.Event(True)
+                self.s.record()
+                return self
+
+            def __exit__(self, *exc):
+                self.e.record()
+                self.owner._cur.append((self.name, self.s, self.e))
+                return False
+
+        def phase(self, name):
+            return DominoTreeWorkerV2._StepTimer._Phase(self, name)
+
+        def end_step(self) -> None:
+            self._steps.append(self._cur)
+            self._cur = []
+            if len(self._steps) < self.every:
+                return
+            torch.get_device_module(self.device).synchronize()
+            agg: dict = {}
+            for step in self._steps:
+                for name, s, e in step:
+                    agg[name] = agg.get(name, 0.0) + s.elapsed_time(e)
+            n = len(self._steps)
+            parts = " ".join(f"{k}={v / n:.3f}" for k, v in agg.items())
+            logger.info(
+                "[DominoTree] step timing over %d steps (ms/step): %s | sum=%.3f",
+                n, parts, sum(agg.values()) / n,
+            )
+            self._steps = []
+
     def _tree_decode_forward(self, model_worker_batch, on_publish):
         from sgl_kernel.speculative import reconstruct_indices_from_tree_mask
 
@@ -1184,18 +1251,29 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         draft_input = batch.spec_info
         verified = draft_input.verified_id.view(-1)
 
+        timing = getattr(self, "_step_timer", None)
+        if timing is None:
+            every = int(os.environ.get("DOMINOTREE_STEP_TIMING", "0") or 0)
+            timing = self._step_timer = (
+                DominoTreeWorkerV2._StepTimer(every, device) if every > 0 else False
+            )
+        _ph = timing.phase if timing else _null_phase
+
         # 1) Domino block draft (raw per-position hidden).
-        draft_hidden = self._domino_draft_block(batch)  # [bs, N, H]
+        with _ph("draft"):
+            draft_hidden = self._domino_draft_block(batch)  # [bs, N, H]
 
         # 2) Assemble the tree: DEFAULT = Option B batched frontier (same
         # conditional scorer, zero host syncs); `conditional` selects the
         # per-request best-first builder used by the paper's builder ablation.
         if self.tree_builder == "frontier":
-            draft_tokens_2d, intra_mask = self._build_frontier_trees(
+            with _ph("build"):
+                draft_tokens_2d, intra_mask = self._build_frontier_trees(
                 draft_hidden, verified, bs, n, device
             )
         else:
-            draft_tokens_2d, intra_mask = self._build_conditional_trees(
+            with _ph("build"):
+                draft_tokens_2d, intra_mask = self._build_conditional_trees(
                 draft_hidden, verified, bs, n, device
             )
 
@@ -1253,12 +1331,13 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         batch.spec_info = verify_input
 
         # 6) Prepare + run target verify (EAGLE allocates the n verify slots).
-        verify_forward_batch, can_run_cuda_graph = eagle_prepare_for_verify(
-            verify_input,
-            self.model_runner.req_to_token_pool,
-            batch,
-            self.target_worker,
-        )
+        with _ph("prepare"):
+            verify_forward_batch, can_run_cuda_graph = eagle_prepare_for_verify(
+                verify_input,
+                self.model_runner.req_to_token_pool,
+                batch,
+                self.target_worker,
+            )
         # NOTE: do NOT pass skip_attn_backend_init=True here. Unlike DFLASH's
         # DFlashVerifyInput.prepare_for_verify (which plans the target attention
         # backend itself), eagle_prepare_for_verify only plans it in the
@@ -1269,19 +1348,21 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         # `q.shape[0] (N) != qo_indptr[-1]` crash. Omitting the flag (EAGLE's
         # behavior, eagle_worker_v2.py:1480-1484) lets forward_extend re-plan
         # the attention backend for the N tree nodes + custom tree mask.
-        target_out = self.target_worker.forward_batch_generation(
-            batch=None,
-            forward_batch=verify_forward_batch,
-            is_verify=True,
-        )
+        with _ph("verify"):
+            target_out = self.target_worker.forward_batch_generation(
+                batch=None,
+                forward_batch=verify_forward_batch,
+                is_verify=True,
+            )
         logits_output = target_out.logits_output
 
         # 7) Tree acceptance. eagle_sample dispatches greedy (T=0) vs
         # threshold-sampled (T>0) internally on sampling_info; accept_lens
         # includes the bonus token.
-        predict, accept_lens, accept_index = eagle_sample(
-            verify_input, batch, logits_output, None
-        )
+        with _ph("accept"):
+            predict, accept_lens, accept_index = eagle_sample(
+                verify_input, batch, logits_output, None
+            )
         new_seq_lens = prefix_lens + accept_lens
         if on_publish is not None:
             on_publish(new_seq_lens)
@@ -1289,6 +1370,8 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         # 8) Compact the accepted (possibly non-contiguous) tree path to the
         # front so target KV + hidden look like DFLASH's contiguous chain.
         allocator = self.target_worker.model_runner.token_to_kv_pool_allocator
+        _commit = _ph("commit")
+        _commit.__enter__()
         move_accept_tokens_to_target_kvcache(
             batch, accept_index, accept_lens - 1, allocator
         )
@@ -1319,6 +1402,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             commit_lens=commit_lens,
         )
         logits_output.hidden_states = None
+        _commit.__exit__(None, None, None)
 
         # 10) Bonus/next verified id = last accepted token per req.
         bonus = torch.gather(
@@ -1329,6 +1413,8 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             new_seq_lens=new_seq_lens,
             cur_allocated_seq_lens_cpu=draft_input.reserved_seq_lens_cpu,
         )
+        if timing:
+            timing.end_step()
         verify_done = torch.get_device_module(device).Event()
         verify_done.record()
         next_draft_input.verify_done = verify_done
