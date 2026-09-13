@@ -47,13 +47,26 @@ for CAP in "${CANDIDATES[@]}"; do
 
   # Burst CAP concurrent requests; any OOM shows up as a failed request or an
   # error in the server log.
-  fails=0
+  # Wait ONLY on the burst curls. A bare `wait` also waits on the backgrounded server (job
+  # control is off in a non-interactive script, so `setsid ... &` leaves it a direct child),
+  # which hangs the probe forever and holds the GPU.
+  # The previous counter was also a no-op: `|| fails=$((fails+1)) &` increments in a subshell,
+  # so the parent always saw 0 and no burst failure was ever detected.  -- fix 2026-09-13
+  case "$CAP" in ''|*[!0-9]*) log "cap=$CAP: not a positive integer"; continue ;; esac
+  [ "$CAP" -ge 1 ] || { log "cap=$CAP: not >= 1"; continue; }
+  BURST_RC="$(mktemp -d)" || { log "cap=$CAP: mktemp failed"; continue; }
+  BURST_PIDS=""
   for i in $(seq 1 "$CAP"); do
-    curl -fsS "http://127.0.0.1:$PORT/generate" -H 'Content-Type: application/json' \
-      -d '{"text":"Write a detailed explanation of how a binary search works.","sampling_params":{"temperature":0,"max_new_tokens":512}}' \
-      > /dev/null 2>&1 || fails=$((fails+1)) &
+    (
+      curl -fsS "http://127.0.0.1:$PORT/generate" -H 'Content-Type: application/json' \
+        -d '{"text":"Write a detailed explanation of how a binary search works.","sampling_params":{"temperature":0,"max_new_tokens":512}}' \
+        > /dev/null 2>&1 || echo x > "$BURST_RC/$i"
+    ) &
+    BURST_PIDS="$BURST_PIDS $!"
   done
-  wait
+  for pid in $BURST_PIDS; do wait "$pid" 2>/dev/null; done
+  fails=$(find "$BURST_RC" -type f 2>/dev/null | wc -l | tr -d ' ')
+  rm -rf "$BURST_RC"
   if grep -qiE "out of memory|CUDA error|OutOfMemory" "$HERE/capfind_${METHOD}_${CAP}.log"; then
     log "cap=$CAP: OOM in server log"; continue
   fi

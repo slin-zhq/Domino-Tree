@@ -181,7 +181,16 @@ def make_sender(*, dry_run: bool, base_url: str, timeout_s: int,
         out = resp.json()
         if not isinstance(out, dict):
             raise RuntimeError(f"expected a dict /generate response, got {type(out).__name__}")
-        return out.get("meta_info", {}) or {}
+        meta = out.get("meta_info", {}) or {}
+        # A 200 with no completion_tokens is a FAILED request, not an empty one: left as {} it is
+        # counted in n_prompts with zero tokens and nothing is logged, so a cell of mostly-dead
+        # requests still reports positive TPS. Raising is fail-closed.
+        # PRESENCE, not truthiness -- completion_tokens == 0 is a legitimate immediate-EOS
+        # response and must not be rejected.  -- fix 2026-09-13
+        if meta.get("completion_tokens") is None:
+            raise RuntimeError(
+                f"/generate returned 200 with no completion_tokens: {str(out)[:200]}")
+        return meta
 
     return _http
 
