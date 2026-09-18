@@ -1,0 +1,31 @@
+Collected 2026-09-14 (helmet.jsonl / helmet.prompts.jsonl at the default tree budget in
+each <size>/<method>/ directory) and 2026-09-14/15 (the dominotree_b32 / dominotree_b64
+budget-sweep arms), single RTX 5090 (32 GB), TP=1, both Qwen3-4B and Qwen3-8B.
+sglang=0.5.15.post1
+DOMINOTREE_BUILDER_GRU_TABLE=1 (opt-in GRU input table; see docs/domino_tree_ieee_access)
+
+Benchmark: HELMET summarization (infbench_sum, multi_lexsum), length bins 8192/16384/32768,
+T=0, n=50 prompts/cell, cap-1200 generation, bs=1.
+
+Directory layout and which arm backs which table:
+  <size>/<method>/            default DominoTree tree budget (16); AR/EAGLE-3/DFlash/
+                               Domino-chain have only one arm each. Backs tab:app-helmet
+                               and tab:app-helmet-8b in full, and tab:sglang-longctx's
+                               DominoTree column at Qwen3-4B (this paper's measured
+                               long-context optimum for 4B up to 16K).
+  4b/dominotree_b32/          DominoTree at tree budget 32, Qwen3-4B. Sweep-only arm
+                               (tab:longctx-budget); NOT used in the 4B main table.
+  8b/dominotree_b32/          DominoTree at tree budget 32, Qwen3-8B -- the measured
+                               long-context optimum for 8B up to 16K. Backs
+                               tab:sglang-longctx's DominoTree column at Qwen3-8B AND
+                               the budget-32 rows of tab:app-helmet-8b. Collected in a
+                               separate serving session on the same pod as the other 8B
+                               arms (same hardware/software stack; see the paper's
+                               Table~tab:sglang-longctx caption).
+  8b/dominotree_b64/          DominoTree at tree budget 64, Qwen3-8B. Sweep-only arm
+                               (tab:longctx-budget); loses on every cell.
+
+This replaces the RTX 5080 (16 GB, TP=2) long-context data published earlier, which
+additionally capped Qwen3-4B at 16K (a card-memory limit the 32 GB card removes -- the
+4B column here reaches 32K). See results/serving/README.md and the paper's Section
+"Long context" for the full story.

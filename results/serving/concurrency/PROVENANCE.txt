@@ -1,0 +1,17 @@
+Collected 2026-09-13, single RTX 5090 (32 GB), TP=1, both Qwen3-4B and Qwen3-8B.
+sglang=0.5.15.post1
+DominoTree tree budget: 32 (both model sizes)
+DOMINOTREE_BUILDER_GRU_TABLE=1 (opt-in GRU input table; see docs/domino_tree_ieee_access)
+Datasets: gsm8k, mbpp, mt-bench (first turn only). Concurrency swept: 2,4,8,16,32.
+max_new_tokens=512, temperature=0.0.
+
+Admission caps (max-running-requests each method actually sustains on this card,
+measured with the harness's own cap-probe rather than assumed): all five methods reach
+32 at BOTH model sizes -- see caps.env in each size subdirectory. 4b/caps.env is
+reconstructed from the collection run log (`cap[method]=NN` lines); 8b/caps.env is the
+harness's own emitted file, copied verbatim.
+
+This replaces the RTX 5080 (16 GB, TP=2) concurrency data published earlier: on that
+card DominoTree's own cap was well below 32 (a batch-cap artifact), which the 32 GB
+card removes. See results/serving/README.md and the paper's Section "Serving under
+concurrency" for the full story.
