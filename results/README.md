@@ -7,6 +7,47 @@ Evidence bundle backing the DominoTree paper. Raw per-prompt records live under
 python make_latex_table.py --raw-dir results/raw --out-dir results/tables_gpunative
 ```
 
+## Table 1's headline node budget changed in the IEEE Access revision
+
+**The rest of this file describes the ORIGINAL (arXiv) Table 1**, headlined at node
+budget 16 (both model sizes), reproduced by `make_latex_table.py` above. **The current
+paper's Table 1** (`tab:main`) uses a wider headline budget at both sizes — **32 at
+Qwen3-4B, 128 at Qwen3-8B** — following further tree-builder work after arXiv (the fused
+GPU-native builder; see `docs/domino_tree_ieee_access/` in the research repo). Both
+pipelines are kept: the arXiv one is still exact and citable for that version of the
+paper, and the current one supersedes it for anything printed in the IEEE Access
+manuscript. To reproduce the CURRENT Table 1:
+
+```bash
+python gen_table1.py --out-dir results/table1_audit
+```
+
+Raw sources (new, added alongside the arXiv-era `raw/` directories below):
+
+| dir | contents | backs |
+| --- | --- | --- |
+| `raw/tab1f_4b/` | `ar` + `dominotree@{16,32,64}`, GPU-native fused builder, Qwen3-4B | current Table 1 4B (DominoTree row, headline @32), the budget-ablation appendix (@16/@32/@64) |
+| `raw/tab1_8b/` | `ar` + `dominotree@128`, GPU-native builder, Qwen3-8B, RTX A6000 | current Table 1 8B (DominoTree row, headline @128) |
+
+`gen_table1.py` requires **numpy and torch** (CPU is sufficient) and reads, besides the
+two directories above: `raw/baseline_ddtree_caddtree/` (4B AR/DFlash/CaDDTree),
+`raw/8b/ref8b_perprompt_jsonl/` (8B AR/DFlash/CaDDTree), `raw/domino_official/qwen3-4b/`
+and `raw/8b/domino_official/qwen3-8b/` (official Domino, both sizes), and
+`raw/conditioning_ladder/matched/` (the conditioning-decomposition appendix) — all
+already present in this repo.
+
+**Known gap: DDTree's raw source at the new budgets (32 at 4B, 128 at 8B) is not yet
+staged.** DDTree runs through the official CaDDTree harness, which caches per-prompt
+results as a `torch.load`-able pickle, not JSONL. This repo avoids shipping that pickle
+format directly (see the 8B `*.pt.summary.json` convention a few sections down — a
+JSON-only export of the fields a reader needs, not the tensors); the budget-32/128
+DDTree pickles have not yet been converted to that format. `gen_table1.py` looks for them
+at `raw/ddtree_b32_4b/{dataset}_T{temp}.json` and `raw/ddtree_b128_8b/{dataset}_T{temp}.json`
+and will fail loudly (`MISSING RAW FILE`) at that cell until they are staged — see the
+comment at the top of `gen_table1.py` for exactly what to extract and how. Every other
+row of the current Table 1 (AR, DFlash, CaDDTree, Domino, DominoTree, at both sizes) has
+its raw file in this repo already.
+
 ## Convention: the GPU-native builder is the default
 
 DominoTree's default tree builder is the **GPU-native CUDA-graph builder**. The
