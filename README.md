@@ -23,14 +23,18 @@ the serving tables (bs=1, concurrency goodput, HELMET long context).
 ```
 benchmark.py, dominotree.py, dominotree_gpu.py   the HF research harness
   run_benchmark.sh, run_pipeline.sh              …its drivers
-  make_latex_table.py                            …raw JSONL -> the paper's tables
-  make_conditioning_ladder_table.py              …raw JSONL -> the paper's Table 13
+  make_latex_table.py                            …raw JSONL -> Table 1 as published at arXiv (budget 16)
+  gen_table1.py                                  …raw JSONL -> the CURRENT Table 1 (budget 32/128; needs torch+numpy)
+  run_tab1f_4b_remote.sh, harvest_tab1f_4b.sh,
+  agg_tab1f_4b.py                                …the Qwen3-4B fused-builder recollection behind gen_table1.py
+  make_conditioning_ladder_table.py              …raw JSONL -> the paper's conditioning-ladder table
 sglang_dominotree/                               the SGLang plugin
   src/dominotree_sglang/                         …algorithm registration + tree builder
   benchmarks/{bs1,concurrency,helmet}/           …the three serving benchmarks
   PROVENANCE.md, verify_vendored_head.py         …copied-code manifest + copy proof
-results/raw/, results/tables_gpunative/          harness raw data + derived tables
-results/serving/                                 serving raw data + the no-GPU audit
+results/raw/, results/tables_gpunative/          harness raw data + derived tables (arXiv-era Table 1)
+results/raw/tab1f_4b/, results/raw/tab1_8b/      harness raw data for the CURRENT Table 1 (fused builder)
+results/serving/                                 serving raw data + the no-GPU audit (single RTX 5090)
 demo/                                            side-by-side record-then-replay demo
 ```
 
@@ -40,18 +44,20 @@ Every published number can be re-derived on a laptop — no GPU, no model weight
 to the paper's LaTeX source. Clone the repo and run these three, in any order:
 
 ```bash
-# 1. Serving tables: recompute all 88 published cells from raw per-prompt JSONL
-#    and diff them against the values printed in the paper.  (stdlib only, ~0.3 s)
+# 1. Serving tables (single RTX 5090, TP=1, both model sizes): recompute every published
+#    cell from raw per-prompt/per-cell JSONL and diff against the values printed in the
+#    paper.  (stdlib only, ~1 s)
 python3 results/serving/verify_published_numbers.py
-#    expected: ALL CELLS REPRODUCE FROM RAW DATA.
+#    expected: ALL 1109 CELLS REPRODUCE FROM RAW DATA.
 
 # 2. Copied code: prove the vendored Domino head is byte-identical to the official
 #    source at a pinned commit, modulo declared patches.  (stdlib only, ~1 s)
 python3 sglang_dominotree/verify_vendored_head.py
 #    expected: PASS: the vendored Domino head is byte-identical ...
 
-# 3. Offline tables: regenerate Table 1, the pairwise CIs, and the ablation from raw
-#    JSONL.  (needs `pip install -r requirements.txt`; ~60 s each, bootstrap-bound)
+# 3. Offline Table 1 AS PUBLISHED AT arXiv (headline node budget 16, both sizes):
+#    regenerate Table 1, the pairwise CIs, and the ablation from raw JSONL.
+#    (needs `pip install -r requirements.txt`; ~60 s each, bootstrap-bound)
 python make_latex_table.py --raw-dir results/raw --out-dir /tmp/check4b
 python make_latex_table.py --raw-dir results/raw/8b --domino-model-dir qwen3-8b \
   --domino-no-warmup --no-warmup-drop --model-label Qwen3-8B --table-suffix _8b \
@@ -61,6 +67,12 @@ cmp /tmp/check4b/pairwise_ci.csv     results/tables_gpunative/pairwise_ci.csv
 cmp /tmp/check8b/table1_cells_8b.csv results/tables_gpunative/table1_cells_8b.csv
 cmp /tmp/check8b/pairwise_ci_8b.csv  results/tables_gpunative/pairwise_ci_8b.csv
 #    expected: silence — the CSVs reproduce byte for byte, bootstrap CIs included
+
+# 4. Offline Table 1 AS PUBLISHED NOW (headline node budget 32 at Qwen3-4B, 128 at
+#    Qwen3-8B, following the fused GPU-native builder): needs numpy AND torch (CPU is
+#    fine). Fails loudly at the DDTree row until its budget-32/128 raw source is staged
+#    -- see results/README.md and the comment at the top of gen_table1.py.
+python gen_table1.py --out-dir /tmp/check_table1_current
 ```
 
 Compare the **CSVs**, not the `.md` tables: the checked-in Markdown was run through a
@@ -186,6 +198,26 @@ its own `spec_generate(block_size=1)` — see the normalization note further dow
 > normalize by Domino's AR). It works on a copy, removes only that arm, and touches no
 > timing path — but the default runs Domino completely unpatched.
 
+### Reproducing the CURRENT Table 1 headline (fused GPU-native builder)
+
+The headline node budget in the current paper is wider than at arXiv — 32 at Qwen3-4B,
+128 at Qwen3-8B (`results/raw/tab1f_4b/`, `results/raw/tab1_8b/`; see
+[`gen_table1.py`](gen_table1.py) and `results/README.md`). Collecting the Qwen3-4B side
+yourself (`run_tab1f_4b_remote.sh`) needs two environment variables the default
+`run_benchmark.sh` path above does not:
+
+```bash
+export DOMINOTREE_FRONTIER_SRC=/path/to/sglang_dominotree/src/dominotree_sglang/tree/frontier.py
+export DOMINOTREE_BUILDER_GRU_TABLE=1   # opt-in GRU input table (+1.55% TPS, tau-identical); used for every headline number in this revision
+```
+
+`DOMINOTREE_FRONTIER_SRC` points the offline research harness at the SGLang plugin's
+frontier-builder module so it benchmarks the same fused GPU-native builder the serving
+plugin uses, rather than the harness's own (slower) reference builder. Both env vars are
+consumed by `run_tab1f_4b_remote.sh`, which drives `benchmark.py --builder frontier`
+across all 8 datasets, 3 temperatures, and node budgets 16/32/64; `harvest_tab1f_4b.sh`
+then copies a finished remote run here and summarizes it with `agg_tab1f_4b.py`.
+
 ## SGLang serving
 
 DominoTree also runs inside SGLang as a speculative-decoding plugin: a separate package
@@ -210,8 +242,10 @@ python -m sglang.launch_server \
 The server then serves DominoTree on SGLang's OpenAI-compatible and `/generate` endpoints
 at any temperature. The defaults are the configuration the paper reports, so no
 environment knobs are needed. For the plain Domino chain baseline, use
-`--speculative-algorithm DOMINO`; for a larger target model, raise `--tp-size` (e.g., Qwen3-8B uses
-`--tp-size 2` in our experiment on a 2xRTX-5080 machine.).
+`--speculative-algorithm DOMINO`. **All of this paper's serving numbers** (`results/serving/`)
+are from a single RTX 5090 (32 GB), `--tp-size 1`, for **both** Qwen3-4B and Qwen3-8B — no
+tensor parallelism anywhere in that section; raise `--tp-size` yourself only if your card
+cannot hold the 8B target and its KV cache at TP=1.
 
 Supported SGLang versions, requirements, tuning knobs, and what the plugin overrides:
 [`sglang_dominotree/README.md`](sglang_dominotree/README.md). The three serving benchmarks
@@ -245,24 +279,31 @@ is rebuilt from the shipped raw JSONL.
   `graphbest/` puts every arm at its fastest builder, which is what a deployment sees.
   Each carries a `PROVENANCE.txt` with the exact protocol and per-round build costs.
   Rebuild with `python3 make_conditioning_ladder_table.py` (stdlib only).
-- `results/serving/` — the SGLang serving raw data, covering the three serving benchmarks
-  (single request, goodput under concurrency, HELMET long context), both model sizes
-  (Qwen3-4B at TP=1, Qwen3-8B at TP=2), and all five methods compared under identical
-  serving flags (AR, DFlash, EAGLE-3, the Domino chain, DominoTree). Includes the
-  per-prompt sidecars behind the paired-bootstrap CIs, a `MANIFEST.sha256`, and its own
-  `README.md` mapping each file to the table it backs.
+- `results/raw/tab1f_4b/`, `results/raw/tab1_8b/` — the CURRENT Table 1 headline data
+  (node budget 32 at Qwen3-4B, 128 at Qwen3-8B, fused GPU-native builder); rebuild with
+  `gen_table1.py` (needs numpy + torch; see "Reproducing the CURRENT Table 1 headline"
+  above). `results/raw/dominotree/` above remains the arXiv-era (budget 16) data and
+  keeps `make_latex_table.py` reproducing that version exactly.
+- `results/serving/` — the SGLang serving raw data: a **single RTX 5090 (32 GB), TP=1,
+  for both Qwen3-4B and Qwen3-8B** (no tensor parallelism), covering the three serving
+  benchmarks (single request, goodput under concurrency, HELMET long context) and all
+  five methods compared under identical serving flags (AR, DFlash, EAGLE-3, the Domino
+  chain, DominoTree). Includes the per-prompt sidecars behind the paired-bootstrap CIs, a
+  `MANIFEST.sha256`, and its own `README.md` mapping each file to the table it backs.
 
 Both halves of the evidence — the offline tables above and the serving tables — can be
 re-derived on a laptop: no GPU, no model weights, no access to the paper's LaTeX source.
-For serving, this recomputes all 88 published cells from the raw per-prompt JSONL and diffs
+For serving, this recomputes every published cell from the raw per-prompt JSONL and diffs
 them against the values printed in the paper (stdlib only, expected output
-`ALL CELLS REPRODUCE FROM RAW DATA.`):
+`ALL 1109 CELLS REPRODUCE FROM RAW DATA.`):
 
 ```bash
 python3 results/serving/verify_published_numbers.py
 ```
 
-The offline tables regenerate the same way:
+The offline tables regenerate the same way (this is the **arXiv-era** Table 1, headline
+node budget 16 both sizes; for the current, wider-budget headline use `gen_table1.py` as
+shown above):
 
 ```bash
 # Qwen3-4B: Table 1, pairwise CIs, conditioning ablation
