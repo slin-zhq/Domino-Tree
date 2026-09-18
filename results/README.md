@@ -28,25 +28,23 @@ Raw sources (new, added alongside the arXiv-era `raw/` directories below):
 | --- | --- | --- |
 | `raw/tab1f_4b/` | `ar` + `dominotree@{16,32,64}`, GPU-native fused builder, Qwen3-4B | current Table 1 4B (DominoTree row, headline @32), the budget-ablation appendix (@16/@32/@64) |
 | `raw/tab1_8b/` | `ar` + `dominotree@128`, GPU-native builder, Qwen3-8B, RTX A6000 | current Table 1 8B (DominoTree row, headline @128) |
+| `raw/ddtree_b32_4b/` | `baseline` + `ddtree_tb32`, portable export of the official CaDDTree harness cache, Qwen3-4B | current Table 1 4B DDTree row and paired CIs |
+| `raw/ddtree_b128_8b/` | `baseline` + `ddtree_tb128`, portable export of the official CaDDTree harness cache, Qwen3-8B | current Table 1 8B DDTree row and paired CIs |
 
-`gen_table1.py` requires **numpy and torch** (CPU is sufficient) and reads, besides the
-two directories above: `raw/baseline_ddtree_caddtree/` (4B AR/DFlash/CaDDTree),
+`gen_table1.py` requires **numpy only** and reads, besides the directories above:
+`raw/baseline_ddtree_caddtree/` (4B AR/DFlash/CaDDTree),
 `raw/8b/ref8b_perprompt_jsonl/` (8B AR/DFlash/CaDDTree), `raw/domino_official/qwen3-4b/`
 and `raw/8b/domino_official/qwen3-8b/` (official Domino, both sizes), and
 `raw/conditioning_ladder/matched/` (the conditioning-decomposition appendix) — all
 already present in this repo.
 
-**Known gap: DDTree's raw source at the new budgets (32 at 4B, 128 at 8B) is not yet
-staged.** DDTree runs through the official CaDDTree harness, which caches per-prompt
-results as a `torch.load`-able pickle, not JSONL. This repo avoids shipping that pickle
-format directly (see the 8B `*.pt.summary.json` convention a few sections down — a
-JSON-only export of the fields a reader needs, not the tensors); the budget-32/128
-DDTree pickles have not yet been converted to that format. `gen_table1.py` looks for them
-at `raw/ddtree_b32_4b/{dataset}_T{temp}.json` and `raw/ddtree_b128_8b/{dataset}_T{temp}.json`
-and will fail loudly (`MISSING RAW FILE`) at that cell until they are staged — see the
-comment at the top of `gen_table1.py` for exactly what to extract and how. Every other
-row of the current Table 1 (AR, DFlash, CaDDTree, Domino, DominoTree, at both sizes) has
-its raw file in this repo already.
+The DDTree exports retain one JSONL row for each prompt/turn and each of the two arms,
+including `time_per_output_token`, all per-round acceptance lengths, output length, and
+the checked protocol fields. They intentionally omit output tensors, prompts, and
+harness-local paths. Thus the command above is the complete one-command, dependency-free
+reproduction of the current Table 1; it fails loudly on a missing, duplicate, short, or
+protocol-mismatched cell. The private pickle fallback in `gen_table1.py` is opt-in only
+and is not needed for public reproduction.
 
 ## Convention: the GPU-native builder is the default
 
