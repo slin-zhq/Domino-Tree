@@ -39,6 +39,8 @@ from __future__ import annotations
 import importlib.util
 import math
 import os
+import sys
+import types
 
 from dominotree import TreeNode
 
@@ -80,10 +82,24 @@ def _load_frontier_module():
                 + "\nSet DOMINOTREE_FRONTIER_SRC to the plugin's tree/frontier.py."
             )
         print(f"[frontier-build] loading builder from {src}")
+        # ``frontier.py`` uses a relative import for its fused depth body.  Do
+        # not import ``dominotree_sglang.tree``: its real package initializer
+        # imports the SGLang-dependent tree stack.  Instead give this source
+        # directory a private, synthetic package so ``.fused_depth`` resolves
+        # directly beside the exact builder source being benchmarked.
+        pkg_name = "dominotree_frontier_pkg"
+        pkg = sys.modules.get(pkg_name)
+        if pkg is None:
+            pkg = types.ModuleType(pkg_name)
+            pkg.__path__ = [os.path.dirname(src)]
+            sys.modules[pkg_name] = pkg
         spec = importlib.util.spec_from_file_location(
-            "dominotree_frontier_src", src
+            f"{pkg_name}.frontier", src
         )
         mod = importlib.util.module_from_spec(spec)
+        # Register before execution: dataclasses, tracebacks, and any future
+        # self-imports observe a normal importable module identity.
+        sys.modules[spec.name] = mod
         spec.loader.exec_module(mod)
         _module = mod
     return _module
