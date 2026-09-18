@@ -91,6 +91,46 @@ structured (the production default is ``corr_topm = 64``).
 When ``DOMINOTREE_FRONTIER_GRAPH`` is not ``"0"``, the static-shape body is
 captured once per batch-size bucket and replayed on subsequent calls.  Capture
 is best-effort: any error permanently selects the eager path for this builder.
+
+Dispatch-cost fusions (``DOMINOTREE_BUILDER_FUSION``, default on)
+-----------------------------------------------------------------
+Profiling the captured graph (``scripts/domino_tree/profile_frontier.py``,
+RTX 5080, Qwen3-4B shapes) showed the build is **GPU-dispatch-bound**: ~747
+dependent kernels of ~2.3 us each, with cost linear in DEPTH and inert in
+width.  Latency is therefore bought by removing KERNELS, not FLOPs.  Three
+rewrites do that without changing the tree:
+
+1. ``embed_proj[0]`` is split at the ``cat`` boundary.  It is a bias-free
+   ``Linear(H + G -> E)`` over ``cat([ph_d, lane_states])`` and the ``ph``
+   half does not depend on the lane, so that half is lifted out of the depth
+   loop into ONE ``[bs, D, H] x [H, E]`` GEMM.  Removes D concatenations
+   (2 ``memcpy128`` each) and shrinks each per-depth GEMM's contraction to G.
+2. The parent ledger holds one entry per LANE, not per candidate: the k-fold
+   broadcast folds into the final gather (``sel_idx // k``), removing D
+   ``repeat_interleave`` allocations and shrinking D ledger writes k-fold.
+3. The intra-tree ancestor mask is a boolean transitive closure by repeated
+   SQUARING (``ceil(log2 D)`` rounds) instead of D sequential parent-pointer
+   hops -- the largest kernel-count item outside the depth loop.
+4. ``prefix_gru.flatten_parameters()`` is called once at construction, because
+   cuDNN otherwise re-compacts the GRU weights on EVERY call -- once per depth,
+   inside the hot loop.
+
+Measured on the RTX 5080 at Qwen3-4B shapes, budget 16: 747 -> 592 kernels and
+1.725 -> 1.457 ms of graph wall (-15.5%).  Note what the inventory says about
+what is left: with ~2.5 us per kernel and 592 of them accounting for the full
+1.457 ms, this builder's latency is simply ``kernels x 2.5 us``.  The D-sweep
+agrees (0.084 ms per depth level, ~34 kernels/depth, plus a ~48-kernel tail).
+So the only remaining lever of any size is launching FEWER kernels per depth --
+a fused depth body -- and no amount of arithmetic reduction will help.
+
+(2) and (3) are exact reindexing / exact 0-1 integer arithmetic in fp32, so
+they are bit-identical to the originals.  (1) is exact in real arithmetic but
+splits one floating-point reduction into two, so it differs by ~1 ulp of the
+fp32 accumulator -- orders of magnitude below the bf16 drift floor documented
+above, but a real change, which is why it is gated and why the gate is an
+end-to-end tau A/B and not an assertion.  Setting
+``DOMINOTREE_BUILDER_FUSION=0`` restores all three legacy paths in the SAME
+build, so the A/B is an env flip rather than a cross-build comparison.
 """
 
 from __future__ import annotations
@@ -198,6 +238,105 @@ class FrontierTreeBuilder:
         if self.corr_topm > self._vocab:
             raise ValueError("corr_topm must be <= vocab")
 
+        # ``embed_proj[0]`` is a bias-free Linear(H + G -> E) applied to
+        # ``cat([ph_d, lane_states], -1)`` once per depth. The ph half is
+        # LANE-INDEPENDENT, so the concatenation and D-1 of the D GEMMs are
+        # redundant: split the weight once here, lift the ph half out of the
+        # depth loop as a single [bs, D, H] x [H, E] GEMM, and per depth run
+        # only the [bs, W, G] x [G, E] lane half plus a broadcast add. This
+        # removes the per-depth ``torch.cat`` (2 memcpy128 each) and shrinks
+        # the per-depth GEMM's contraction from H + G to G.
+        #
+        # Algebraically exact; in floating point the reduction is split in two,
+        # so results differ by ~1 ulp of the fp32 accumulator — far below the
+        # bf16 drift floor the builder already documents, but it is why this is
+        # gated by DOMINOTREE_BUILDER_FUSION and validated by an end-to-end tau
+        # A/B rather than assumed. The halves are cached because the drafter is
+        # frozen at inference; they must be rebuilt if its weights ever change.
+        self._fusion = os.environ.get("DOMINOTREE_BUILDER_FUSION", "1") != "0"
+        if self._fusion:
+            w0 = draft.embed_proj[0].weight  # [E, H + G]
+            self._w0_ph = w0[:, : self._hidden].t().contiguous()  # [H, E]
+            self._w0_lane = w0[:, self._hidden :].t().contiguous()  # [G, E]
+            # cuDNN compacts a GRU's weights on every call when they are not
+            # already one contiguous block, and torch's "RNN module weights are
+            # not part of single contiguous chunk of memory" warning is present
+            # in this builder's own profile. MEASURED 2026-09-03: this call
+            # changes NOTHING at bf16 on torch 2.11/cu130 -- kernel count and
+            # graph wall are byte-identical with and without it, and the warning
+            # still fires, because flatten_parameters() early-returns when cuDNN
+            # will not accept the dtype. Kept because it is free and would apply
+            # to an fp16/fp32 drafter; do NOT re-open it as a bf16 lever, and do
+            # not attribute any of the 30 memcpy128 per build to the GRU.
+            try:
+                draft.prefix_gru.flatten_parameters()
+            except Exception:  # pragma: no cover - never block the build on it
+                logger.warning("[DominoTree] prefix_gru.flatten_parameters() failed")
+        else:
+            self._w0_ph = self._w0_lane = None
+
+        # Triton fusion of the per-depth body (see fused_depth.py). Requires the
+        # round-1 fusion because it writes the LANE-keyed parent ledger, and the
+        # restricted-correction path because the full-vocab scorer has no fused
+        # form. ON by default: it took the build from 1.457 to 0.788 ms and
+        # returned +4.62% end-to-end TPS with tau unchanged (STATUS.md D67).
+        # Set DOMINOTREE_BUILDER_FUSED_DEPTH=0 to restore the torch depth loop
+        # in the SAME build, which is how the A/B was collected.
+        self._fused_depth = None
+        if (
+            os.environ.get("DOMINOTREE_BUILDER_FUSED_DEPTH", "2") != "0"
+            and self._fusion
+            and self.corr_topm > 0
+            and self.device.type == "cuda"
+        ):
+            from .fused_depth import FusedDepth
+
+            fd = FusedDepth(
+                W=self.W,
+                E=int(draft.embed_proj[0].out_features),
+                M=self.corr_topm,
+                K=self.node_topk,
+                G=self._gru_dim,
+            )
+            if fd.available and not fd.bind_gru(draft.prefix_gru):
+                logger.warning(
+                    "[DominoTree] fused depth body: unsupported GRU "
+                    "(multi-layer/bidirectional/projected); keeping torch's"
+                )
+                fd.gru_weights = None
+            if fd.version >= 2 and not (
+                fd.gru_weights is not None
+                and fd.bind_lane(draft.embed_proj[0].weight[:, self._hidden :])
+            ):
+                fd.version = 1
+            # Opt-in: precomputed GRU input gates for every token (D74). Costs
+            # ~0.93 GB of VRAM at Qwen3 shapes, which the server can no longer
+            # give to requests -- so it is never on by default.
+            if (
+                fd.version >= 2
+                and os.environ.get("DOMINOTREE_BUILDER_GRU_TABLE", "0") == "1"
+            ):
+                if int(getattr(embed_tokens, "tp_size", 1)) > 1:
+                    # A vocab-parallel embedding is a collective; building a
+                    # full table from one rank's shard would be wrong.
+                    logger.warning(
+                        "[DominoTree] GRU input table needs an unsharded "
+                        "embedding (tp_size=1); not building it"
+                    )
+                else:
+                    rows = int(embed_tokens.weight.shape[0])
+                    nbytes = fd.bind_table(embed_tokens, rows)
+                    logger.info(
+                        "[DominoTree] GRU input table: %d x %d, %.2f GB",
+                        rows, 3 * self._gru_dim, nbytes / 1e9,
+                    )
+            self._fused_depth = fd if fd.available else None
+            if self._fused_depth is None:
+                logger.warning(
+                    "[DominoTree] fused depth body requested but unavailable "
+                    "(Triton missing?); falling back to the torch depth loop"
+                )
+
         self._states: dict[int, _State] = {}
         # Graphs own the captured allocations; retain their associated static
         # state in the per-bs pool for the lifetime of this builder.
@@ -208,6 +347,21 @@ class FrontierTreeBuilder:
             and self.corr_topm > 0
         )
         self._graph_failed = False
+        # Stamp the arm into the log: a bs=1 verdict can turn on ~0.5 ms/step,
+        # so "which code produced this number" must never be a guess.
+        fdv = self._fused_depth
+        logger.info(
+            "[DominoTree] frontier builder: fusion=%s fused_depth=%s "
+            "depth_body=v%d gru_table=%s graph=%s budget=%d W=%d D=%d",
+            self._fusion,
+            fdv is not None,
+            fdv.version if fdv is not None else 0,
+            fdv is not None and fdv.gi_table is not None,
+            self._graph_enabled,
+            self.budget,
+            self.W,
+            self.D,
+        )
 
     # ------------------------------------------------------------------
     # Per-bs static state.
@@ -303,17 +457,40 @@ class FrontierTreeBuilder:
         if self.corr_topm > 0:
             # == per-depth torch.topk(base_logits[d], corr_topm) of the
             # reference (same model-dtype rows -> same indices), batched.
-            cand = torch.topk(base_logits, self.corr_topm, dim=-1).indices
+            # topk already returns the values, so re-gathering them was a
+            # second pass over the same elements; copy_ widens bf16 -> fp32
+            # exactly. Bit-identical, two launches fewer.
+            basec, cand = torch.topk(base_logits, self.corr_topm, dim=-1)
             st.S_cand.copy_(cand)
-            st.S_basec.copy_(torch.gather(base_logits, -1, cand).float())
+            st.S_basec.copy_(basec)
         pd = min(self.prefix_len, self.D)
         if pd > 0:
             # == log_prob_topk(base_logits[d], node_topk): path-independent, so
             # once per step is value-identical to the reference's per-node call.
-            logp = torch.log_softmax(base_logits[:, :pd].float(), dim=-1)
-            vals, idx = torch.topk(logp, k=self.node_topk, dim=-1)
-            st.S_prefix_toks.copy_(idx)
-            st.S_prefix_lps.copy_(vals)
+            # ``dtype=`` widens inside the softmax kernel instead of
+            # materializing a [bs, pd, V] fp32 copy first (same values).
+            fd = self._fused_depth
+            if fd is not None and fd.version >= 2 and base_logits.stride(-1) == 1:
+                # D74: same top-k (the candidate topk above), log-sum-exp split
+                # over the vocabulary in two launches instead of a one-SM
+                # softmax + gather + copies.
+                fd.prefix_rows(base_logits=base_logits, pd=pd, st=st)
+                return
+            logp = torch.log_softmax(base_logits[:, :pd], dim=-1, dtype=torch.float32)
+            if self.corr_topm > 0:
+                # log_softmax subtracts one constant per row, so it cannot
+                # reorder the row: its top-k is the logits' top-k, which the
+                # candidate topk above already produced in descending order
+                # (node_topk <= corr_topm by the constructor's clamp). Only an
+                # EXACT bf16 logit tie could be ordered differently -- the same
+                # tie caveat the module docstring states for the whole builder.
+                idx = cand[:, :pd, : self.node_topk]
+                st.S_prefix_toks.copy_(idx)
+                st.S_prefix_lps.copy_(torch.gather(logp, -1, idx))
+            else:
+                vals, idx = torch.topk(logp, k=self.node_topk, dim=-1)
+                st.S_prefix_toks.copy_(idx)
+                st.S_prefix_lps.copy_(vals)
 
     # ------------------------------------------------------------------
     # The depth-synchronous body. Reads only static inputs + model weights,
@@ -339,22 +516,82 @@ class FrontierTreeBuilder:
 
         led_scores = torch.full((bs, D, wk), neg_inf, dtype=torch.float32, device=dev)
         led_tokens = torch.zeros((bs, D, wk), dtype=torch.long, device=dev)
-        led_parent = torch.full((bs, D, wk), -1, dtype=torch.long, device=dev)
+        # Parent pointers are a property of the LANE, not of each of its k
+        # children, so the ledger stores one entry per lane and the k-fold
+        # broadcast is folded into the final gather (``sel_idx // k`` is exactly
+        # ``d * W + lane`` because the flat ledger index is
+        # ``d*W*k + lane*k + child`` with ``child < k``). Storing [bs, D, W]
+        # instead of [bs, D, W*k] removes one ``repeat_interleave`` alloc+copy
+        # AND shrinks the per-depth ledger write k-fold. Pure reindexing — the
+        # selected parents are bit-identical to the wide-ledger version.
+        led_parent = torch.full(
+            (bs, D, W if self._fusion else wk), -1, dtype=torch.long, device=dev
+        )
 
         ep = self.draft.embed_proj
+        # Lane-independent half of ep[0] for ALL depths in one GEMM (see the
+        # weight-split note in __init__).
+        ph_half = (
+            torch.matmul(st.S_ph[:, :D], self._w0_ph) if self._fusion else None
+        )  # [bs, D, E]
 
+        fd = self._fused_depth
+        v2 = fd is not None and fd.version >= 2
+        # v2: the ledger index of every lane the frontier keeps, per depth --
+        # the only entries the final top-B can contain when W >= B (see
+        # _final_rank_kernel), so finalization ranks D*W entries, not D*W*k.
+        led_kept = (
+            torch.empty((bs, D, W), dtype=torch.long, device=dev) if v2 else None
+        )
         for d in range(D):
             # --- score all W*k children of the frontier (3 correction cases,
             # conditional_children.py:64-92 with a leading [bs, W] batch) ---
-            if d < self.prefix_len:
+            # The fused kernel covers case 2 only; the prefix rows keep the
+            # torch path (there is nothing to fuse -- they are one broadcast).
+            fused_here = fd is not None and d >= self.prefix_len
+            advance = d + 1 < D
+            if v2:
+                # v2: ONE GEMM over the current lanes feeds both the scorer
+                # (first E columns) and, when there is a next depth, the GRU's
+                # hidden gates (the rest) -- see FusedDepth.bind_lane.
+                x = fd.lane_gemm(lane_states, with_gru=advance)
+            if fused_here:
+                # Case 2, fused: the whole scorer -- broadcast add, SiLU, casts,
+                # w2[cand] gather, bmm, log_softmax, top-k, candidate gather,
+                # cumulative add and all three ledger writes -- in ONE kernel.
+                # Only the lane-half GEMM stays outside, because it is a real
+                # GEMM and cuBLAS should keep it.
+                fd.score(
+                    hpre=(
+                        x[..., : fd.E]
+                        if v2
+                        else torch.matmul(lane_states, self._w0_lane)
+                    ),
+                    ph_half_d=ph_half[:, d],
+                    w2=ep[2].weight,
+                    cand_d=st.S_cand[:, d],
+                    basec_d=st.S_basec[:, d],
+                    lane_scores=lane_scores,
+                    lane_node=lane_node,
+                    led_s_d=led_scores[:, d],
+                    led_t_d=led_tokens[:, d],
+                    led_p_d=led_parent[:, d],
+                )
+            elif d < self.prefix_len:
                 # Case 1: uncorrected prefix rows — path-independent, identical
                 # for every lane.
                 vals = st.S_prefix_lps[:, d].unsqueeze(1).expand(bs, W, k)
                 toks = st.S_prefix_toks[:, d].unsqueeze(1).expand(bs, W, k)
             elif self.corr_topm > 0:
                 # Case 2: restricted correction (published default corr_topm=64).
-                ph_d = st.S_ph[:, d].unsqueeze(1).expand(bs, W, H)
-                h = ep[1](ep[0](torch.cat([ph_d, lane_states], dim=-1))).float()
+                if self._fusion:
+                    pre = ph_half[:, d].unsqueeze(1) + torch.matmul(
+                        lane_states, self._w0_lane
+                    )  # [bs, W, E]
+                else:
+                    ph_d = st.S_ph[:, d].unsqueeze(1).expand(bs, W, H)
+                    pre = ep[0](torch.cat([ph_d, lane_states], dim=-1))
+                h = ep[1](pre).float()
                 # Gather w2[cand] INSIDE the depth body — never materialize the
                 # [bs, K, M, E] candidate-weight tensor (§2A memory).
                 w2c_d = ep[2].weight[st.S_cand[:, d]].float()  # [bs, M, E]
@@ -364,6 +601,11 @@ class FrontierTreeBuilder:
                 vals, local_idx = torch.topk(
                     torch.log_softmax(corrected, dim=-1), k=k, dim=-1
                 )
+                # MEASURED 2026-09-03: gathering from the [bs, M] row instead
+                # (``gather(S_cand[:, d], 1, local_idx.reshape(bs, W*k))``) is a
+                # NO-OP — identical kernel count and wall time — because gather
+                # reads the stride-0 expand without materializing it. Left as
+                # is; do not "optimize" this expand away.
                 toks = torch.gather(
                     st.S_cand[:, d].unsqueeze(1).expand(bs, W, self.corr_topm),
                     2,
@@ -379,33 +621,92 @@ class FrontierTreeBuilder:
                     torch.log_softmax(full, dim=-1), k=k, dim=-1
                 )
 
-            # Cumulative path scores; -inf lanes poison all their descendants.
-            cum = lane_scores.unsqueeze(-1) + vals  # [bs, W, k] float32
-            flat_cum = cum.reshape(bs, wk)
-            flat_tok = toks.reshape(bs, wk)
+            if not fused_here:
+                # Cumulative path scores; -inf lanes poison all their
+                # descendants.
+                cum = lane_scores.unsqueeze(-1) + vals  # [bs, W, k] float32
+                flat_cum = cum.reshape(bs, wk)
+                flat_tok = toks.reshape(bs, wk)
 
-            # --- ledger: log EVERY scored candidate ---
-            led_scores[:, d] = flat_cum
-            led_tokens[:, d] = flat_tok
-            led_parent[:, d] = lane_node.repeat_interleave(k, dim=1)
+                # --- ledger: log EVERY scored candidate ---
+                led_scores[:, d] = flat_cum
+                led_tokens[:, d] = flat_tok
+                led_parent[:, d] = (
+                    lane_node if self._fusion else lane_node.repeat_interleave(k, dim=1)
+                )
 
             # --- keep top-W per request, GRU-advance the kept lanes ---
-            if d + 1 < D:
-                keep_vals, keep_idx = torch.topk(flat_cum, W, dim=1)  # [bs, W]
-                kept_tok = torch.gather(flat_tok, 1, keep_idx)
-                parent_lane = keep_idx // k
-                h0 = torch.gather(
-                    lane_states, 1, parent_lane.unsqueeze(-1).expand(bs, W, G)
+            if v2:
+                # Rank-select the best W children (no state copy), then one
+                # GRU kernel that gathers parent rows by index. Runs at the
+                # last depth too, where only the kept indices are used.
+                kept_tok = torch.empty((bs, W), dtype=torch.long, device=dev)
+                keep_vals = torch.empty((bs, W), dtype=torch.float32, device=dev)
+                next_node = led_kept[:, d]
+                parent_lane = torch.empty((bs, W), dtype=torch.long, device=dev)
+                fd.select_rank(
+                    led_s_d=led_scores[:, d],
+                    led_t_d=led_tokens[:, d],
+                    kept_tok=kept_tok,
+                    lane_scores_out=keep_vals,
+                    lane_node_out=next_node,
+                    parent_lane=parent_lane,
+                    d_off=d * wk,
                 )
+                if not advance:
+                    break
+                lane_states = fd.gru_gather(
+                    kept_tok=kept_tok,
+                    parent_lane=parent_lane,
+                    x=x,
+                    lane_states=lane_states,
+                    embed_tokens=self.embed_tokens,
+                )
+                lane_scores = keep_vals
+                lane_node = next_node
+            elif advance:
+                if fd is not None:
+                    # topk + token gather + parent-lane divide + lane-state
+                    # gather, fused. Fresh buffers per depth (as before): shapes
+                    # are static, so graph capture owns the allocations.
+                    kept_tok = torch.empty((bs, W), dtype=torch.long, device=dev)
+                    h0 = torch.empty(
+                        (bs, W, G), dtype=lane_states.dtype, device=dev
+                    )
+                    keep_vals = torch.empty(
+                        (bs, W), dtype=torch.float32, device=dev
+                    )
+                    next_node = torch.empty((bs, W), dtype=torch.long, device=dev)
+                    fd.select(
+                        led_s_d=led_scores[:, d],
+                        led_t_d=led_tokens[:, d],
+                        lane_states=lane_states,
+                        h0=h0,
+                        kept_tok=kept_tok,
+                        lane_scores_out=keep_vals,
+                        lane_node_out=next_node,
+                        d_off=d * wk,
+                    )
+                else:
+                    keep_vals, keep_idx = torch.topk(flat_cum, W, dim=1)  # [bs, W]
+                    kept_tok = torch.gather(flat_tok, 1, keep_idx)
+                    parent_lane = keep_idx // k
+                    h0 = torch.gather(
+                        lane_states, 1, parent_lane.unsqueeze(-1).expand(bs, W, G)
+                    )
+                    next_node = d * wk + keep_idx  # global ledger index
                 # One GRU step per kept lane, batched over bs*W (the reference
                 # runs the same module with batch = node_topk per pop).
                 emb = self.embed_tokens(kept_tok)  # [bs, W, E]
-                _, hn = self.draft.prefix_gru(
-                    emb.reshape(bs * W, 1, -1), h0.reshape(1, bs * W, G)
-                )
-                lane_states = hn.reshape(bs, W, G)
+                if fd is not None and fd.gru_weights is not None:
+                    lane_states = fd.gru_cell(emb, h0)
+                else:
+                    _, hn = self.draft.prefix_gru(
+                        emb.reshape(bs * W, 1, -1), h0.reshape(1, bs * W, G)
+                    )
+                    lane_states = hn.reshape(bs, W, G)
                 lane_scores = keep_vals
-                lane_node = d * wk + keep_idx  # global ledger index
+                lane_node = next_node
 
         # --- global top-B over the ledger: selection + topological order in
         # ONE stable descending sort. Flat ledger index is depth-major, so the
@@ -413,6 +714,19 @@ class FrontierTreeBuilder:
         # child) always precede children, even on exact score ties; on tie-free
         # inputs the order equals the heap's pop order. ---
         L, B = self.L, self.budget
+        if v2:
+            # D74: ranking IS the stable sort; two launches write every output.
+            fd.finalize(
+                st=st,
+                led_scores=led_scores,
+                led_tokens=led_tokens,
+                led_parent=led_parent,
+                led_kept=led_kept if W >= B else None,
+                D=D,
+                B=B,
+                mask_token_id=self.mask_token_id,
+            )
+            return
         scores_flat = led_scores.reshape(bs, L)
         sorted_scores, order = torch.sort(
             scores_flat, dim=1, descending=True, stable=True
@@ -422,7 +736,15 @@ class FrontierTreeBuilder:
         valid = torch.isfinite(sel_scores)  # -inf = dead-leaf slot (sorts last)
 
         sel_tokens = torch.gather(led_tokens.reshape(bs, L), 1, sel_idx)
-        sel_parent_led = torch.gather(led_parent.reshape(bs, L), 1, sel_idx)
+        if self._fusion:
+            # sel_idx // k == d * W + lane (see the led_parent comment above).
+            sel_parent_led = torch.gather(
+                led_parent.reshape(bs, D * W),
+                1,
+                torch.div(sel_idx, k, rounding_mode="floor"),
+            )
+        else:
+            sel_parent_led = torch.gather(led_parent.reshape(bs, L), 1, sel_idx)
         sel_depth = sel_idx // wk + 1  # flat tree depth (root = 0)
 
         # Remap ledger parent indices -> positions in the ordered node list.
@@ -460,24 +782,47 @@ class FrontierTreeBuilder:
         st.S_out_scores[:, 0] = 0.0
         st.S_out_scores[:, 1:] = sel_scores
 
-        # --- intra-tree ancestor mask [bs, N, N]: self + <=D parent-pointer
-        # hop iterations (same convention as build_intra_tree_mask_from_parents:
-        # mask[b, i, j] == True iff j is an ancestor of i or i == j). ---
-        mask = torch.zeros((bs, N, N), dtype=torch.bool, device=dev)
-        # self-mask (i == j): fill each batch's diagonal via a strided VIEW.
-        # NOT mask[:, arange, arange] = True — advanced-indexing with a device
-        # tensor triggers a CUDA sync (caught by the zero-sync gate).
-        mask.diagonal(dim1=1, dim2=2).fill_(True)
+        # --- intra-tree ancestor mask [bs, N, N] (same convention as
+        # build_intra_tree_mask_from_parents: mask[b, i, j] == True iff j is an
+        # ancestor of i or i == j), by BOOLEAN TRANSITIVE CLOSURE via repeated
+        # squaring instead of D sequential parent-pointer hops.
+        #
+        # Why: the hop loop costs D iterations x ~7 kernels; on a GPU-dispatch-
+        # bound builder (747 tiny kernels, 2.3 us each) that is the single
+        # largest kernel-count item in the depth-independent tail. Squaring
+        # reaches hop distance 2^t, so ceil(log2(D)) rounds cover every flat
+        # depth <= D: 4 rounds x 2 kernels at D=16.
+        #
+        # Exactness: A holds 0/1 in float32 and every partial sum is bounded by
+        # N (<= 2^24), so the products and the clamp are exact integer
+        # arithmetic — the result is bit-identical to the boolean hop loop, not
+        # an approximation.
         parent_full = st.S_out_parents
-        cur = parent_full.clone()
-        for _ in range(D):  # max flat depth <= D -> <= D hops to the root
-            alive = cur >= 0
-            hop = F.one_hot(cur.clamp(min=0), N).bool() & alive.unsqueeze(-1)
-            mask |= hop
-            cur = torch.where(
-                alive, torch.gather(parent_full, 1, cur.clamp(min=0)), cur
-            )
-        st.S_out_mask.copy_(mask)
+        if self._fusion:
+            # A[b, i, j] = 1 iff parent(i) == j (the root's -1 contributes
+            # nothing), plus the identity on the diagonal so each squaring also
+            # carries the SHORTER paths forward.
+            adj = F.one_hot(parent_full.clamp(min=0), N).to(torch.float32)
+            adj = adj * (parent_full >= 0).unsqueeze(-1).to(torch.float32)
+            # Diagonal via a strided VIEW, never mask[:, arange, arange] —
+            # advanced indexing with a device tensor triggers a CUDA sync
+            # (caught by the zero-sync gate).
+            adj.diagonal(dim1=1, dim2=2).fill_(1.0)
+            for _ in range(max(D - 1, 0).bit_length()):
+                adj = torch.clamp(torch.bmm(adj, adj), max=1.0)
+            st.S_out_mask.copy_(adj > 0.5)
+        else:
+            mask = torch.zeros((bs, N, N), dtype=torch.bool, device=dev)
+            mask.diagonal(dim1=1, dim2=2).fill_(True)
+            cur = parent_full.clone()
+            for _ in range(D):  # max flat depth <= D -> <= D hops to the root
+                alive = cur >= 0
+                hop = F.one_hot(cur.clamp(min=0), N).bool() & alive.unsqueeze(-1)
+                mask |= hop
+                cur = torch.where(
+                    alive, torch.gather(parent_full, 1, cur.clamp(min=0)), cur
+                )
+            st.S_out_mask.copy_(mask)
 
     # ------------------------------------------------------------------
     # Public API.
