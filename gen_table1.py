@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Rebuild Table 1, paired CIs, and the Domino-variant appendix table from per-prompt raw data.
 
-Requires numpy and torch (CPU is sufficient). No summaries/CSV/table literals are inputs:
+Requires numpy only. Torch and the DDTree harness are required only when an explicit
+private-pickle fallback is requested. No summaries/CSV/table literals are inputs:
 every number is recomputed from per-prompt/per-turn raw records. Missing, duplicate,
 nonfinite or short cells are fatal (the script raises rather than silently skipping a
 cell). All source files are SHA256-recorded in provenance.json in the output directory.
@@ -31,24 +32,12 @@ and 128 at Qwen3-8B (both DDTree and DominoTree; see the paper's tab:main). Raw 
     results/raw/conditioning_ladder/matched/  marg@16 / condstatic@16 / dominotree@16
                                                (the conditioning-decomposition appendix)
 
-KNOWN GAP -- DDTree's raw source is NOT yet staged at either model size. DDTree is
-benchmarked through the official CaDDTree harness, which caches its raw per-prompt
-results as torch-pickled objects (`torch.load(..., weights_only=False)`), not JSONL.
-Publishing that pickle format as-is is exactly what this repo avoids elsewhere (see
-`results/raw/8b/collect_8b_2048_20260704/baseline_official/*.pt.summary.json`, which
-ships only the JSON-extracted `rows` a downstream reader needs, not the tensors). The
-budget-32 (4B) / budget-128 (8B) DDTree pickles have not been converted to that format
-yet, so `ddroot` below points at directories that do not exist in this checkout:
-
-    results/raw/ddtree_b32_4b/{dataset}_T{temp}.json    (NOT STAGED)
-    results/raw/ddtree_b128_8b/{dataset}_T{temp}.json   (NOT STAGED)
-
-Running this script will fail loudly at that cell (`MISSING RAW FILE`) until someone with
-a torch environment loads the source `.pt`-style cache, extracts each response's
-`baseline`/`ddtree_tb{32,128}` arms (`acceptance_lengths`, `decode_rounds`,
-`time_per_output_token`, matching the schema `ddarms()` below already expects), and
-writes the result as JSON to one of the two directories above -- the same conversion
-already performed for the 8B DFlash/CaDDTree/baseline arms shipped in this repo.
+DDTree's budget-32 (4B) and budget-128 (8B) arms are exported as dependency-free
+per-prompt JSONL in `results/raw/ddtree_b32_4b/` and
+`results/raw/ddtree_b128_8b/`.  The JSONL preserves acceptance lengths, timing, and
+the protocol fields checked below; it intentionally omits the original tensors and
+harness-local paths. A private torch-pickle fallback exists only through the explicit
+`--ddtree-pickle-root4b`/`--ddtree-pickle-root8b` options.
 """
 from __future__ import annotations
 import argparse, csv, hashlib, json, math, re
@@ -102,7 +91,28 @@ def arm(p, ds, method):
         rows.append(r)
     return check(rows, ds, f'{p}:{method}')
 
-def ddarms(p, ds, temp, size, budget):
+def ddtree_jsonl_arms(p, ds, temp, size, budget):
+    method=f'ddtree_tb{budget}'
+    common=dict(dataset=ds,temperature=float(temp),budget=budget,max_new_tokens=2048,max_samples=50,
+                flash_attn=False,skip_baseline=False)
+    out={}
+    for m in ['baseline',method]:
+        rr=[]
+        for row in jsonl(p):
+            if row.get('method') != m: continue
+            require(all(row.get(k)==v for k,v in common.items()), f'WRONG PROTOCOL {p}: {row}')
+            require(f'Qwen3-{size}' in row.get('model','') and 'DFlash-b16' in row.get('draft',''), f'WRONG MODEL {p}: {row}')
+            require(str(budget) in str(row.get('tree_budget','')).split(','), f'WRONG BUDGET {p}: {row}')
+            acc=row.get('acceptance_lengths')
+            require(isinstance(acc,list) and len(acc)>0 and len(acc)==row.get('decode_rounds'), f'INVALID ACCEPTANCES {p}: {row}')
+            require(all(isinstance(x,int) and x>0 for x in acc), f'INVALID ACCEPTANCES {p}: {row}')
+            require(0<row.get('num_output',0)<=2048 and row.get('time_per_output_token',0)>0, f'INVALID LENGTH/TIME {p}: {row}')
+            r=dict(row);r['tps']=1/float(r['time_per_output_token']);r['mean_accept']=fmean(acc);r['source']=str(p)
+            rr.append(r)
+        out[m]=check(rr, ds, f'{p}:{m}')
+    return out[method],out['baseline']
+
+def ddtree_pickle_arms(p, ds, temp, size, budget):
     import torch
     x=torch.load(source(p), map_location='cpu', weights_only=False)
     a=x['args'];method=f'ddtree_tb{budget}'
@@ -122,6 +132,11 @@ def ddarms(p, ds, temp, size, budget):
                            tps=1/float(v.time_per_output_token),mean_accept=fmean(acc),source=str(p)))
         out[m]=check(rr, ds, f'{p}:{m}')
     return out[method],out['baseline']
+
+def ddarms(p, ds, temp, size, budget, pickle_path=None):
+    if p.is_file(): return ddtree_jsonl_arms(p, ds, temp, size, budget)
+    require(pickle_path is not None, f'MISSING RAW FILE: {p} (pickle fallback requires an explicit --ddtree-pickle-root{size.lower()})')
+    return ddtree_pickle_arms(pickle_path, ds, temp, size, budget)
 
 def official(root, ds, temp, size, mode):
     p=root/f'qwen3-{size.lower()}'/f'T{temp}'/f'{mode}_{ds}.jsonl'
@@ -175,6 +190,8 @@ def main():
     ap=argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--out-dir',type=Path,default=ROOT/'results/table1_audit')
     ap.add_argument('--bootstrap-iters',type=int,default=10000)
+    ap.add_argument('--ddtree-pickle-root4b',type=Path,help='trusted private pickle directory; opt-in fallback only')
+    ap.add_argument('--ddtree-pickle-root8b',type=Path,help='trusted private pickle directory; opt-in fallback only')
     args=ap.parse_args();out=args.out_dir;out.mkdir(parents=True,exist_ok=True)
     data={};cells={};variants={};budget_check={}
     for size in ['4B','8B']:
@@ -182,6 +199,7 @@ def main():
         dtroot=ROOT/'results/raw'/('tab1f_4b' if size=='4B' else 'tab1_8b')
         refroot=ROOT/'results/raw/baseline_ddtree_caddtree' if size=='4B' else ROOT/'results/raw/8b/ref8b_perprompt_jsonl'
         ddroot=ROOT/'results/raw'/('ddtree_b32_4b' if size=='4B' else 'ddtree_b128_8b')
+        pickleroot=args.ddtree_pickle_root4b if size=='4B' else args.ddtree_pickle_root8b
         officialroot=ROOT/'results/raw/domino_official' if size=='4B' else ROOT/'results/raw/8b/domino_official'
         for temp in TEMPS:
             for ds in DS:
@@ -190,7 +208,8 @@ def main():
                 data[size,temp,ds,'DominoTree']=(dr,oa)
                 ba=arm(refroot/f'{ds}_T{temp if size=="4B" else "0.0"}.jsonl',ds,'baseline')
                 for m,raw in [('DFlash','dflash'),('CaDDTree','caddtree')]: data[size,temp,ds,m]=(arm(refroot/f'{ds}_T{temp}.jsonl',ds,raw),ba)
-                data[size,temp,ds,'DDTree']=ddarms(ddroot/f'{ds}_T{temp}.json',ds,temp,size,budget)
+                data[size,temp,ds,'DDTree']=ddarms(ddroot/f'{ds}_T{temp}.jsonl',ds,temp,size,budget,
+                                                    pickleroot/f'{ds}_T{temp}.json' if pickleroot else None)
                 modes={mode:official(officialroot,ds,temp,size,mode) for mode in ['graph','eager']}
                 winner=max(modes,key=lambda m:mean(modes[m],'tps'))
                 data[size,temp,ds,'Domino']=(modes[winner],oa)
