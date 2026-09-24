@@ -137,68 +137,119 @@ def table_end():
 
 
 def conc_table(all_conc):
+    """Goodput columns plus ONE tau column, mirroring Table~\\ref{tab:sglang-conc}.
+
+    The old form put "1415/11.93" in every cell, repeating tau across all five
+    concurrency levels -- but tau is FLAT in c (e.g. 4B GSM8K DominoTree: 11.93, 11.88,
+    11.96, 11.90, 11.88). Restating a constant five times per row crowded out the goodput
+    numbers, which are the axis that actually moves. tau is now reported once, as the mean
+    over the sweep, with its spread stated so the reader can see the collapse is safe.
+    """
+    spreads = []
     lines = table_start(
-        r'Per-dataset SGLang concurrency results, both models, single RTX~5090/32\,GB, TP=1, '
-        r'$T{=}0$, 512-token generation cap. Each entry is goodput (aggregate output tok/s) / '
-        r'mean per-prompt accepted length $\tau$ at the indicated offered concurrency $c$. '
-        r'All five methods have equal admission caps of 32. GSM8K and MBPP use 128 prompts; '
-        r'MT-Bench uses 80. AR is the $\tau{=}1$ reference. '
-        r'Table~\ref{tab:sglang-conc} averages goodput over datasets and $\tau$ over datasets and concurrency.',
-        'tab:app-conc', 'llccccc',
-        ['Dataset & Method & ' + ' & '.join(f'$c{{=}}{c}$' for c in CONCS) + END])
+        r'Per-dataset SGLang concurrency results, both models, one RTX~5090 (32\,GB), '
+        r'$T{=}0$, 512-token generation cap. Columns give goodput (aggregate output tok/s) at '
+        r'each offered concurrency $c$; $\tau$ is the mean per-prompt accepted length over the '
+        r'sweep, reported once because it is flat in $c$ (max spread across $c$ within a row: '
+        r'SPREAD\%). All five methods have equal admission caps of 32. GSM8K and MBPP use 128 '
+        r'prompts; MT-Bench uses 80. AR is the $\tau{=}1$ reference. '
+        r'Table~\ref{tab:sglang-conc} averages goodput over datasets and $\tau$ over datasets '
+        r'and concurrency. Bold marks the best value in each column within a dataset.',
+        'tab:app-conc', 'll' + 'c' * len(CONCS) + 'c',
+        ['Dataset & Method & ' + ' & '.join(f'$c{{=}}{c}$' for c in CONCS) +
+         r' & $\tau$' + END])
     for size, data in all_conc.items():
-        lines += [r'\midrule', '\\multicolumn{7}{c}{\\textit{Qwen3-' + size + '}}' + END]
+        lines += [r'\midrule', '\\multicolumn{%d}{c}{\\textit{Qwen3-%s}}' % (len(CONCS) + 3, size) + END]
         for d, name in zip(DATASETS, DS_NAMES):
             lines += [r'\midrule']
+            # Bold = best in its column within this dataset block (ties all bolded).
+            best_tps = {c: max(f"{data[m, d, c]['tps']:.0f}" for m in METHODS) for c in CONCS}
+            best_tps = {c: max((data[m, d, c]['tps'] for m in METHODS)) for c in CONCS}
+            tau_of = {m: f"{st.mean(data[m, d, c]['mean_accept'] for c in CONCS):.2f}"
+                      for m in METHODS if m != 'ar'}
+            best_tau = max(tau_of.values(), key=float)
             for m in METHODS:
                 cells = []
                 for c in CONCS:
-                    r = data[m, d, c]
-                    tau = '--' if m == 'ar' else f"{r['mean_accept']:.2f}"
-                    cells.append(f"{r['tps']:.0f}/{tau}")
-                lines.append((name if m == 'ar' else '') + ' & ' + NAMES[m] + ' & ' + ' & '.join(cells) + END)
-    # Keep the 30-row table inside IEEE Access's usable page height.
-    return '\n'.join(lines + table_end()).replace(r'\resizebox{\textwidth}', r'\resizebox{0.85\textwidth}')
+                    v = f"{data[m, d, c]['tps']:.0f}"
+                    cells.append('\\textbf{' + v + '}' if v == f"{best_tps[c]:.0f}" else v)
+                if m == 'ar':
+                    tau = '--'
+                else:
+                    taus = [data[m, d, c]['mean_accept'] for c in CONCS]
+                    spreads.append((max(taus) - min(taus)) / st.mean(taus) * 100)
+                    tau = '\\textbf{' + tau_of[m] + '}' if tau_of[m] == best_tau else tau_of[m]
+                lines.append((name if m == 'ar' else '') + ' & ' + NAMES[m] + ' & ' +
+                             ' & '.join(cells) + ' & ' + tau + END)
+    out = '\n'.join(lines + table_end())
+    out = out.replace(r'\resizebox{\textwidth}', r'\resizebox{0.85\textwidth}')
+    return out.replace('SPREAD', f'{max(spreads):.1f}')
 
 
 def helmet_tables(all_helmet):
-    lines, cis = [], {}
-    for size, (agg, per) in all_helmet.items():
-        extra = (r' Both tree budgets 16 and 32 are shown; Table~\ref{tab:sglang-longctx} uses 32. '
-                 r'The budget-32 arm was collected in a separate serving session on the same pod '
-                 r'as the chain, with the same hardware and software stack.' if size == '8B' else
-                 r' Tree budget 16 is used in Table~\ref{tab:sglang-longctx}.')
-        lines += table_start(
-            'Qwen3-' + size + r' HELMET per-task, per-length results, single RTX~5090/32\,GB, TP=1, '
-            r'bs=1, $T{=}0$, 50 prompts/cell, 1200-token generation cap. '
-            r'TPS = total output tokens / total elapsed time; $\tau$ = mean per-prompt accepted length. '
-            r'Paired-bootstrap rows give percentage change vs.\ the chain [95\% CI], '
-            r'resampling matched prompt indices (5000 draws, seed 0). The TPS CI estimand is '
-            r'the ratio of mean per-prompt TPS, distinct from the aggregate TPS above. '
-            r'$^{*}$ marks a CI containing zero.' + extra,
-            'tab:app-helmet' if size == '4B' else 'tab:app-helmet-8b', 'llcccc',
-            ['Task & Method & Metric & 8K & 16K & 32K' + END])
+    """One merged 4B+8B table, TPS and tau as PAIRED COLUMNS per context length.
+
+    Replaces the old pair tab:app-helmet / tab:app-helmet-8b, which were structurally
+    identical and each carried a `Metric` column putting TPS and tau on ALTERNATING
+    ROWS -- so every method spanned two rows above a blank cell, ~54 rows across two
+    floats. Pairing the columns drops the Metric column and roughly halves the height,
+    and stacking the two models (as Table~\ref{tab:main} and the bs=1 table do) puts
+    the 4B-vs-8B contrast on one page instead of across two floats: the margin over the
+    chain collapses from +29.9% at 4B/8K to +8.8% at 8B/8K. Numbers are unchanged.
+    """
+    cis = {}
+    lines = table_start(
+        r'HELMET per-task, per-length results, both model sizes, one RTX~5090 (32\,GB), '
+        r'batch size 1, $T{=}0$, 50 prompts per cell, up to 1200 generated tokens. '
+        r'TPS = total output tokens / total elapsed time; $\tau$ = mean per-prompt accepted '
+        r'length. Rows marked \emph{vs.\ Domino} give the paired-bootstrap percentage change '
+        r'against the chain [95\% CI], resampling matched prompt indices (5000 draws, seed 0); '
+        r'that CI estimand is the ratio of mean per-prompt TPS, distinct from the aggregate TPS '
+        r'above it. $^{*}$ marks a CI containing zero. Qwen3-4B uses tree budget 16 '
+        r'(the setting Table~\ref{tab:sglang-longctx} reports); for Qwen3-8B both budgets 16 '
+        r'and 32 are shown and Table~\ref{tab:sglang-longctx} uses 32, whose arm was collected '
+        r'in a separate serving session on the same machine as the chain, with the same hardware and '
+        r'software. Bold marks the best TPS and the best $\tau$ in each column within a task.',
+        'tab:app-helmet', 'll*{3}{cc}',
+        [r'Task & Method & \multicolumn{2}{c}{8K} & \multicolumn{2}{c}{16K} & '
+         r'\multicolumn{2}{c}{32K}' + END,
+         r'\cmidrule(lr){3-4}\cmidrule(lr){5-6}\cmidrule(lr){7-8}',
+         r' & & TPS & $\tau$ & TPS & $\tau$ & TPS & $\tau$' + END])
+    for size in ['4B', '8B']:
+        agg, per = all_helmet[size]
+        lines += [r'\midrule',
+                  r'\multicolumn{8}{c}{\textbf{Qwen3-' + size + '}}' + END, r'\midrule']
         arms = METHODS + (['dominotree32'] if size == '8B' else [])
-        for t, name in zip(TASKS, TASK_NAMES):
-            lines += [r'\midrule']
+        for ti, (t, name) in enumerate(zip(TASKS, TASK_NAMES)):
+            if ti:
+                lines.append(r'\cmidrule(lr){1-8}')
+            first = True
+            # Bold = best TPS and best tau in each column within this task block (ties all bolded).
+            btps = {b: max(f"{agg[a_,t,b]['tps']:.1f}" for a_ in arms) for b in BINS}
+            btps = {b: f"{max(agg[a_,t,b]['tps'] for a_ in arms):.1f}" for b in BINS}
+            btau = {b: f"{max(agg[a_,t,b]['tau'] for a_ in arms):.2f}" for b in BINS}
+            bold = lambda v, best: '\\textbf{' + v + '}' if v == best else v
             for arm in arms:
                 label = NAMES.get(arm, 'DominoTree (32)')
                 if arm == 'dominotree':
                     label += ' (16)'
-                for metric in ['tps', 'tau']:
-                    cells = [f"{agg[arm,t,b][metric]:.1f}" if metric == 'tps' else f"{agg[arm,t,b][metric]:.2f}" for b in BINS]
-                    lines.append((name if arm == 'ar' and metric == 'tps' else '') + ' & ' +
-                                 (label if metric == 'tps' else '') + ' & ' +
-                                 ('TPS' if metric == 'tps' else r'$\tau$') + ' & ' + ' & '.join(cells) + END)
+                cells = []
+                for b in BINS:
+                    cells += [bold(f"{agg[arm,t,b]['tps']:.1f}", btps[b]),
+                              bold(f"{agg[arm,t,b]['tau']:.2f}", btau[b])]
+                lines.append((name if first else '') + ' & ' + label + ' & ' +
+                             ' & '.join(cells) + END)
+                first = False
                 if arm.startswith('dominotree'):
                     for field, metric in [('tps', r'$\Delta$TPS\%'), ('accept', r'$\Delta\tau$\%')]:
-                        values = []
+                        vals = []
                         for b in BINS:
                             ci = paired_ci(per[arm,t,b], per['domino_chain',t,b], field)
                             cis[size,arm,t,b,field] = ci
-                            values.append(ci_tex(ci))
-                        lines.append(r' & vs.\ Domino & ' + metric + ' & ' + ' & '.join(values) + END)
-        lines += table_end()
+                            vals.append(r'\multicolumn{2}{c}{' + ci_tex(ci) + '}')
+                        lines.append(r' & \quad\emph{vs.\ Domino}, ' + metric + ' & ' +
+                                     ' & '.join(vals) + END)
+    lines += table_end()
     return '\n'.join(lines), cis
 
 
@@ -241,18 +292,20 @@ def crosscheck(paper, conc, helmet):
     body = table_body(source, 'tab:sglang-longctx')
     found = set()
     for line in body.splitlines():
-        parts = [clean(x) for x in line.removesuffix(END).split('&')]
-        if len(parts) != 7 or parts[0] not in NAMES.values(): continue
+        # Layout: Method & (tau & speedup) x [4B: 8K,16K,32K] x [8B: 8K,16K,32K]; no AR row.
+        parts = [clean(x).replace('$\\times$', '') for x in line.removesuffix(END).split('&')]
+        if len(parts) != 13 or parts[0] not in NAMES.values(): continue
         m = next(m for m in METHODS if NAMES[m] == parts[0])
         found.add(m)
-        for (size,b), cell in zip([(s,b) for s in ['4B','8B'] for b in BINS], parts[1:]):
-            match = re.fullmatch(r'(\d+\.\d+)/(\d+\.\d+)\$\\times\$', cell)
-            assert match, cell
+        vals = iter(parts[1:])
+        for size, b in [(s_, b_) for s_ in ['4B', '8B'] for b_ in BINS]:
+            tau_s, sp_s = next(vals), next(vals)
             agg = helmet[size][0]
             arm = 'dominotree32' if size == '8B' and m == 'dominotree' else m
-            check(f'HELMET {size}/{m}/{b}/tau', st.mean(agg[arm,t,b]['tau'] for t in TASKS), match[1], 2)
-            check(f'HELMET {size}/{m}/{b}/speedup', st.mean(agg[arm,t,b]['tps']/agg['ar',t,b]['tps'] for t in TASKS), match[2], 2)
-    assert len(found) == 5, 'Could not parse all HELMET rows'
+            check(f'HELMET {size}/{m}/{b}/tau', st.mean(agg[arm,t,b]['tau'] for t in TASKS), tau_s, 2)
+            check(f'HELMET {size}/{m}/{b}/speedup', st.mean(agg[arm,t,b]['tps']/agg['ar',t,b]['tps'] for t in TASKS), sp_s, 2)
+    assert len(found) == 4, 'Could not parse all HELMET rows'
+
     return count, problems
 
 

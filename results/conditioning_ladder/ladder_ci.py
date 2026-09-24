@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Three-point conditioning ladder with paired, stratified bootstrap CIs.
+"""Three-point conditioning ladder with paired, stratified CLUSTER bootstrap CIs.
 
 Convention matches tab:c3: Delta% = (A speedup / B speedup - 1), paired per evaluated
 unit (prompt, or MT-Bench turn), stratified by dataset, B=5000 resamples.
+
+Resampling unit is the PROMPT/CONVERSATION (sample_idx), not the turn. MT-Bench's second
+turn is generated from the method's own first-turn answer, so the two turns of one
+conversation are dependent; resampling them independently would understate the CI width.
+We therefore resample conversations with replacement and carry all of their turns along.
+For the seven single-turn datasets each cluster holds exactly one unit, so this is
+identical to the previous per-prompt bootstrap there; only MT-Bench's CIs change.
+Point estimates are unaffected -- they are computed over all units either way.
 """
 import json, glob, random, statistics, collections, sys
 
-ROOT = __import__("sys").argv[1] if len(__import__("sys").argv)>1 else "results/domino_tree/conditioning_ladder_20260816"
+ROOT = __import__("sys").argv[1] if len(__import__("sys").argv)>1 else "results/conditioning_ladder/matched_builder"
 ARMS = ["marg@16", "condstatic@16", "dominotree@16"]
 GROUPS = {"Math": ["gsm8k","math500","aime25"], "Code": ["humaneval","mbpp","livecodebench"],
           "Chat": ["mt-bench","alpaca"]}
@@ -29,13 +37,22 @@ for f in sorted(glob.glob(f"{ROOT}/*_T0.0.jsonl")):
 arbar = {ds: statistics.fmean(v) for ds, v in ar.items()}
 units = {ds: [k for k, v in d.items() if all(a in v for a in ARMS)] for ds, d in per.items()}
 
+# Cluster units by conversation (sample_idx). MT-Bench: 2 turns/cluster; others: 1.
+clusters = {}
+for ds, ks in units.items():
+    g = collections.defaultdict(list)
+    for k in ks:
+        g[k[0]].append(k)          # k = (sample_idx, turn_index)
+    clusters[ds] = list(g.values())
+
 def speedups(ds, key):
     return {a: per[ds][key][a][0] / arbar[ds] for a in ARMS}
 
 def boot(dss, num, den, B=5000, seed=0):
     """Paper convention: a rollup is the UNWEIGHTED mean over its datasets, so the
     ratio is (mean_ds mean_unit num) / (mean_ds mean_unit den). Resampling is paired
-    (same units for both arms) and stratified within each dataset."""
+    (same units for both arms), stratified within each dataset, and clustered by
+    conversation so dependent MT-Bench turns move together."""
     rng = random.Random(seed)
     def ratio(sample_by_ds):
         n = statistics.fmean([statistics.fmean([speedups(ds,k)[num] for k in ks]) for ds, ks in sample_by_ds.items()])
@@ -44,7 +61,11 @@ def boot(dss, num, den, B=5000, seed=0):
     obs = ratio({ds: units[ds] for ds in dss})
     reps = []
     for _ in range(B):
-        s = {ds: [units[ds][rng.randrange(len(units[ds]))] for _ in units[ds]] for ds in dss}
+        s = {}
+        for ds in dss:
+            cs = clusters[ds]
+            picked = [cs[rng.randrange(len(cs))] for _ in cs]
+            s[ds] = [k for c in picked for k in c]
         reps.append(ratio(s))
     reps.sort()
     return obs, reps[int(0.025*B)], reps[int(0.975*B)]

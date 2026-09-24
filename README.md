@@ -68,12 +68,26 @@ cmp /tmp/check8b/table1_cells_8b.csv results/tables_gpunative/table1_cells_8b.cs
 cmp /tmp/check8b/pairwise_ci_8b.csv  results/tables_gpunative/pairwise_ci_8b.csv
 #    expected: silence — the CSVs reproduce byte for byte, bootstrap CIs included
 
-# 4. Offline Table 1 AS PUBLISHED NOW (headline node budget 32 at Qwen3-4B, 128 at
-#    Qwen3-8B, following the fused GPU-native builder): needs numpy AND torch (CPU is
-#    fine). Fails loudly at the DDTree row until its budget-32/128 raw source is staged
-#    -- see results/README.md and the comment at the top of gen_table1.py.
-python gen_table1.py --out-dir /tmp/check_table1_current
+# 4. EVERYTHING IN THE IEEE ACCESS PAPER, in one command (numpy + matplotlib, no GPU):
+bash reproduce_paper.sh
+#    re-derives every table and Figure 1 into results/reproduced/ -- see the map below.
 ```
+
+### Which command produces which part of the paper
+
+| Paper | Produced by | Raw data |
+|---|---|---|
+| Table 1, Table 2, Table 14, abstract claims | `gen_table1.py` | `results/raw/{tab1f_4b,tab1_8b,baseline_ddtree_caddtree,ddtree_b32_4b,ddtree_b128_8b,domino_official,8b/}` |
+| Figure 1 | `gen_figure1.py` (from `gen_table1.py`'s `cells.json`) | same as Table 1 |
+| Tables 3, 4, 10, 11 | `gen_ablation_tables.py` | `results/raw/tab_refresh/` (collected by `run_tab_refresh_remote.sh`) |
+| Tables 12, 13 | `gen_ablation_tables.py` | `results/raw/{candidate_width_saturation,draft_sampling_ablation}/` |
+| Qwen3-8B numbers in *Builder cost* and *Limitations* | `gen_ablation_tables.py` | `results/raw/{budget8b,8b/collect_8b_2048_20260704,8b/dominotree}/` |
+| Table 5 | `results/serving/gen_sglang_bs1_table.py` | `results/serving/bs1/` |
+| Table 6 (incl. Overall row) | `results/serving/gen_sglang_bs1_cis_table.py` | `results/serving/bs1/` |
+| Table 8 | `results/serving/gen_sglang_longctx_table.py` | `results/serving/PUBLISHED.json` (itself re-derived from `longcontext/` by the verifier) |
+| Tables 7, 9, and every serving value | `results/serving/verify_published_numbers.py` | `results/serving/` |
+| Tables 16, 17 | `results/serving/gen_appendix_5090.py` | `results/serving/{concurrency,longcontext}/` |
+| Table 15 | `results/conditioning_ladder/ladder_ci.py` (run on `matched_builder/` and `best_builder/`) | `results/conditioning_ladder/` |
 
 Compare the **CSVs**, not the `.md` tables: the checked-in Markdown was run through a
 formatter that pads table columns, so it matches cell-for-cell but not byte-for-byte.
