@@ -13,8 +13,16 @@ Directory layout and which arm backs which table:
                                and tab:app-helmet-8b in full, and tab:sglang-longctx's
                                DominoTree column at Qwen3-4B (this paper's measured
                                long-context optimum for 4B up to 16K).
-  4b/dominotree_b32/          DominoTree at tree budget 32, Qwen3-4B. Sweep-only arm
-                               (tab:longctx-budget); NOT used in the 4B main table.
+  4b/dominotree_b32/          DominoTree at tree budget 32, Qwen3-4B, from the 2026-09-14/15
+                               session. Sweep-only arm; NOT used in the 4B main table, and NO
+                               LONGER backs tab:longctx-budget -- superseded by the single-
+                               session re-run in 4b/budget_sweep_20260925/ (see below).
+  4b/budget_sweep_20260925/   DominoTree at tree budgets 16/32/64, Qwen3-4B, all three collected
+                               in ONE session on 2026-09-25 (different RTX 5090 host, faster CPU;
+                               see its own PROVENANCE.txt). This is the current source for the
+                               Qwen3-4B row of tab:longctx-budget; its absolute tok/s is not
+                               comparable to the 2026-09-14 session above (tab:sglang-longctx),
+                               only budget-to-budget within this directory.
   8b/dominotree_b32/          DominoTree at tree budget 32, Qwen3-8B -- the measured
                                long-context optimum for 8B up to 16K. Backs
                                tab:sglang-longctx's DominoTree column at Qwen3-8B AND
@@ -23,7 +31,10 @@ Directory layout and which arm backs which table:
                                arms (same hardware/software stack; see the paper's
                                Table~tab:sglang-longctx caption).
   8b/dominotree_b64/          DominoTree at tree budget 64, Qwen3-8B. Sweep-only arm
-                               (tab:longctx-budget); loses on every cell.
+                               (tab:longctx-budget); loses on every cell. Budget 64 for
+                               Qwen3-4B lives in 4b/budget_sweep_20260925/dominotree_b64/,
+                               not here -- this directory is Qwen3-8B's budget-64 arm, not
+                               the only budget-64 arm in the bundle.
 
 This replaces the RTX 5080 (16 GB, TP=2) long-context data published earlier, which
 additionally capped Qwen3-4B at 16K (a card-memory limit the 32 GB card removes -- the

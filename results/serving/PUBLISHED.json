@@ -1,7 +1,7 @@
 {
   "_comment": "Values recomputed from the raw JSONL shipped in this directory. Regenerate with `python3 verify_published_numbers.py --emit PUBLISHED.json`; the working repo's scripts/domino_tree_ieee_access/ cross-checks these against the paper's LaTeX source before they are committed here. Do not hand-edit.",
-  "_expected_cell_checks": 1109,
-  "_known_paper_discrepancies": "Cross-checked against every serving table in the current paper (sections/serving.tex, sections/appendix.tex): 1107/1109 cells match the printed value exactly. Two 'Overall' cells in tab:sglang-bs1 differ from the printed value by 0.01 in tau, a double-rounding artifact (the paper's Overall row appears to average the *already-rounded* per-dataset tau values in some cells and the full-precision values in others; neither convention reproduces every cell). This bundle stores the value this script derives directly and reproducibly from raw data (mean of full-precision per-dataset means, rounded once): 4b/0.0/eagle3 Overall tau = 3.06 here vs. 3.07 as printed; 8b/0.0/dominotree Overall tau = 9.17 here vs. 9.18 as printed. Not a claim of error in the paper -- both values round from data within 0.003 of the rounding boundary -- but recorded here so the mismatch is not mistaken for a verifier bug.",
+  "_expected_cell_checks": 1112,
+  "_known_paper_discrepancies": "Cross-checked against every serving table in the current paper (sections/serving.tex, sections/appendix.tex): 1110/1112 cells match the printed value exactly. Two 'Overall' cells in tab:sglang-bs1 differ from the printed value by 0.01 in tau, a double-rounding artifact (the paper's Overall row appears to average the *already-rounded* per-dataset tau values in some cells and the full-precision values in others; neither convention reproduces every cell). This bundle stores the value this script derives directly and reproducibly from raw data (mean of full-precision per-dataset means, rounded once): 4b/0.0/eagle3 Overall tau = 3.06 here vs. 3.07 as printed; 8b/0.0/dominotree Overall tau = 9.17 here vs. 9.18 as printed. Not a claim of error in the paper -- both values round from data within 0.003 of the rounding boundary -- but recorded here so the mismatch is not mistaken for a verifier bug.",
   "bs1": {
     "4b/0.0/aime25/ar": {
       "tau": 1.0,
@@ -2128,12 +2128,15 @@
     ]
   },
   "longctx_budget": {
-    "4b/16/16": 142.7,
-    "4b/16/32": 136.6,
-    "4b/32/16": 84.8,
-    "4b/32/32": 77.4,
-    "4b/8/16": 206.4,
-    "4b/8/32": 202.3,
+    "4b/16/16": 157.0,
+    "4b/16/32": 150.2,
+    "4b/16/64": 132.4,
+    "4b/32/16": 90.7,
+    "4b/32/32": 83.7,
+    "4b/32/64": 76.0,
+    "4b/8/16": 231.4,
+    "4b/8/32": 225.5,
+    "4b/8/64": 203.5,
     "8b/16/16": 90.7,
     "8b/16/32": 94.6,
     "8b/16/64": 80.7,

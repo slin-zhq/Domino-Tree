@@ -22,7 +22,9 @@ for the full story): a single RTX 5090/32GB, TP=1, for BOTH Qwen3-4B and Qwen3-8
   long context(tab:sglang-longctx, tab:longctx-budget,
                tab:app-helmet, tab:app-helmet-8b)      HELMET summarization, T=0, n=50/cell,
                                                        cap-1200 generation; DominoTree budget
-                                                       16/32(/64 at 8B) swept explicitly
+                                                       16/32/64 swept explicitly at both sizes
+                                                       (4B's sweep is a separate single session,
+                                                       see longcontext/4b/budget_sweep_20260925/)
 
 Conventions, stated here so you can check that we describe what we do:
 
@@ -340,7 +342,9 @@ def check_longctx(published: dict) -> None:
 def check_longctx_budget(published: dict) -> None:
     print("\n== Long-context tree-budget sweep, DominoTree only (tab:longctx-budget) ==")
     arm_for_budget = {
-        "4b": {16: "dominotree", 32: "dominotree_b32"},
+        "4b": {16: "budget_sweep_20260925/dominotree_b16",
+               32: "budget_sweep_20260925/dominotree_b32",
+               64: "budget_sweep_20260925/dominotree_b64"},
         "8b": {16: "dominotree", 32: "dominotree_b32", 64: "dominotree_b64"},
     }
     for size, budgets in arm_for_budget.items():
@@ -480,7 +484,9 @@ def emit_all() -> dict:
                 longctx[f"{size}/{b}/{m}"] = [round(tau, 2), round(spd, 2)]
 
     budget: dict = {}
-    arm_for_budget = {"4b": {16: "dominotree", 32: "dominotree_b32"},
+    arm_for_budget = {"4b": {16: "budget_sweep_20260925/dominotree_b16",
+                             32: "budget_sweep_20260925/dominotree_b32",
+                             64: "budget_sweep_20260925/dominotree_b64"},
                       "8b": {16: "dominotree", 32: "dominotree_b32", 64: "dominotree_b64"}}
     for size, budgets in arm_for_budget.items():
         for b, arm in budgets.items():

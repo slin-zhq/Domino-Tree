@@ -1,0 +1,40 @@
+Qwen3-4B HELMET tree-budget sweep, single session (2026-09-25).
+
+Fills paper Table 9 (tab:longctx-budget), Qwen3-4B row, budgets 16/32/64, DominoTree only.
+Single session; supersedes 4b/dominotree_b32 for tab:longctx-budget. Absolute tok/s in
+this directory is NOT comparable to the September session behind tab:sglang-longctx
+(different RTX 5090 host, faster CPU -- see below); compare budgets within this
+directory, not across sessions.
+
+Host: RunPod SECURE EU-RO-1, RTX 5090, driver 580.126.20, AMD Ryzen 9 7950X.
+Code: Domino-Tree ieee-access-submission@da32661 (plugin byte-identical deploy),
+SGLang 1adb53f, HELMET af609c4, DOMINOTREE_BUILDER_GRU_TABLE=1, T=0, n=50/cell,
+gen cap 1200, bs=1.
+
+Prompts: the exact September prompt files (sha256 below); token gate 300/300 verified
+against the harness's own gate record before collection. HELMET af609c4 samples
+Multi-LexSum demos unseeded, so these prompt files must never be rebuilt from scratch --
+only reused byte-for-byte.
+
+  14a62202d7130cb6eeab64d3acc862a598afd9aa446dd8df6d75c4fd867dd2c8  infbench_sum/8192.jsonl
+  64beec4b51e172ec37014bb232b0d27f47b9b9ce2a97e24b0e5792af86c42b58  infbench_sum/16384.jsonl
+  8d30546e12ced36e9b72d69853ee8a2fa27ce1494defeae38fd7f9ff86e5d1eb  infbench_sum/32768.jsonl
+  d0043fa03746e55b4864cf689560862bb148f251ab686adb683922759252889e  multi_lexsum/8192.jsonl
+  89c831819ee96cfc53938802e9ac290737db4dc1461a9febeb8b644d78517293  multi_lexsum/16384.jsonl
+  752b688a2e619a480b877241d37baace149e2bb39d480e0c8a47ef11c2bc61b8  multi_lexsum/32768.jsonl
+
+| dir            | arm       |
+|-----------------|-----------|
+| dominotree_b16/ | budget 16 |
+| dominotree_b32/ | budget 32 |
+| dominotree_b64/ | budget 64 |
+
+Budget-16 tau and output-token counts match the September dominotree/ arm's per-cell
+values exactly (same prompts, same algorithm at the same budget). Throughput reads
+higher in this bundle -- DominoTree +8.7% on the same 60 prompts -- because this pod's
+CPU is faster and the tree builder is CPU-bound; this is a hardware difference between
+sessions, not a change in the method. See docs/domino_tree_ieee_access/TAKEOVER_20260925.md
+in the working repo for the full collection log.
+
+An AR arm (10 prompts/cell) was also collected on this pod as a machine-health check
+only; it is NOT part of the paper and is not published here.

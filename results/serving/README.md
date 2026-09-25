@@ -37,8 +37,12 @@ results/serving/
   bs1/<size>/<method>/<dataset>_T<temp>.jsonl
   concurrency/<size>/<method>/<method>.jsonl        + caps.env
   longcontext/<size>/<method>/helmet.jsonl          + helmet.prompts.jsonl
-  longcontext/<size>/dominotree_b32/                DominoTree at tree budget 32 (sweep; 8B's MAIN-table arm)
-  longcontext/8b/dominotree_b64/                    DominoTree at tree budget 64, Qwen3-8B only (sweep)
+  longcontext/<size>/dominotree_b32/                DominoTree at tree budget 32 (sweep; 8B's MAIN-table arm;
+                                                     superseded for 4B's tab:longctx-budget row, see below)
+  longcontext/8b/dominotree_b64/                    DominoTree at tree budget 64, Qwen3-8B (sweep)
+  longcontext/4b/budget_sweep_20260925/             DominoTree at tree budgets 16/32/64, Qwen3-4B, one single
+                                                     session (2026-09-25) -- the CURRENT source for the Qwen3-4B
+                                                     row of tab:longctx-budget (see longcontext/PROVENANCE.txt)
 ```
 
 `<size>` ∈ {`4b`, `8b`} · `<method>` ∈ {`ar`, `eagle3`, `dflash`, `domino_chain`,
@@ -65,7 +69,7 @@ the paper are checkable rather than merely quoted. `longcontext/` ships both an 
 | Concurrency Overall (`tab:sglang-conc`)                             | `concurrency/{4b,8b}/`            | `verify_published_numbers.py` / `aggregate_concurrency.py` |
 | Concurrency per-dataset appendix (`tab:app-conc`)                   | `concurrency/{4b,8b}/`            | `gen_appendix_5090.py`        |
 | Long context main table (`tab:sglang-longctx`)                     | `longcontext/{4b,8b}/`, `longcontext/8b/dominotree_b32/` | `verify_published_numbers.py` / `verify_r4_longctx.py` / `ci_r4_8b_b32.py` |
-| Long-context tree-budget sweep (`tab:longctx-budget`)               | `longcontext/*/dominotree*`       | `verify_published_numbers.py` |
+| Long-context tree-budget sweep (`tab:longctx-budget`)               | `longcontext/4b/budget_sweep_20260925/`, `longcontext/8b/dominotree*` | `verify_published_numbers.py` / `gen_longctx_budget_table.py` |
 | HELMET per-task appendix (`tab:app-helmet`, `tab:app-helmet-8b`)    | `longcontext/{4b,8b}/`, `longcontext/8b/dominotree_b32/` | `gen_appendix_5090.py`        |
 
 Regenerate the appendix tables (concurrency per-dataset + HELMET per-task detail) as
@@ -146,9 +150,11 @@ resolved DominoTree's concurrency admission cap, previously well below the other
 methods' on the 16 GB card (a batch-cap artifact, not a property of the method) — every
 method now reaches cap 32 on the 32 GB card. The old bundle's own budget-ablation
 directories (`bs1/4b/dominotree_b32`, `bs1/4b/ar_b32session`,
-`longcontext/4b/dominotree_b15_control`) are gone; the current paper's budget-16-vs-32
-serving comparison is `tab:longctx-budget`, backed by the `dominotree_b32`/`dominotree_b64`
-directories under `longcontext/` in this bundle.
+`longcontext/4b/dominotree_b15_control`) are gone; the current paper's budget-16-vs-32-vs-64
+serving comparison is `tab:longctx-budget`, backed at Qwen3-8B by the `dominotree_b32`/
+`dominotree_b64` directories under `longcontext/8b/` and at Qwen3-4B by the single-session
+`longcontext/4b/budget_sweep_20260925/` bundle (which supersedes the older
+`longcontext/4b/dominotree_b32/` for this table; see `longcontext/PROVENANCE.txt`).
 
 ---
 
