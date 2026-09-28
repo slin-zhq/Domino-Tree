@@ -317,11 +317,18 @@ class FrontierTreeBuilder:
                 and os.environ.get("DOMINOTREE_BUILDER_GRU_TABLE", "0") == "1"
             ):
                 if int(getattr(embed_tokens, "tp_size", 1)) > 1:
-                    # A vocab-parallel embedding is a collective; building a
-                    # full table from one rank's shard would be wrong.
+                    # Not yet supported under tensor parallelism. A
+                    # vocab-parallel embedding gives each rank only its shard
+                    # of the vocabulary rows, so a full table built from one
+                    # rank would be wrong. The builder falls back to the
+                    # regular GRU input path: output is unaffected, only the
+                    # table's speedup is lost. Future work: build one table
+                    # per shard and combine lookups the way the vocab-parallel
+                    # embedding itself does (owner looks up, then all-reduce).
                     logger.warning(
-                        "[DominoTree] GRU input table needs an unsharded "
-                        "embedding (tp_size=1); not building it"
+                        "[DominoTree] GRU input table is not yet supported "
+                        "under tensor parallelism (vocab-parallel embedding, "
+                        "tp_size>1); running without it (output unaffected)"
                     )
                 else:
                     rows = int(embed_tokens.weight.shape[0])

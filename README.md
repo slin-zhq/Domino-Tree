@@ -226,6 +226,12 @@ export DOMINOTREE_FRONTIER_SRC=/path/to/sglang_dominotree/src/dominotree_sglang/
 export DOMINOTREE_BUILDER_GRU_TABLE=1   # opt-in GRU input table (+1.55% TPS, tau-identical); used for every headline number in this revision
 ```
 
+The GRU input table is not yet supported under tensor parallelism: there the embedding is split by
+vocabulary across GPUs, so no single GPU holds every row the table needs. With `tp_size > 1` the
+builder logs a warning and runs without the table; output is unaffected, only its speedup is lost.
+Supporting it (one table per vocabulary shard, combined the way the sharded embedding is) is
+future work.
+
 `DOMINOTREE_FRONTIER_SRC` points the offline research harness at the SGLang plugin's
 frontier-builder module so it benchmarks the same fused GPU-native builder the serving
 plugin uses, rather than the harness's own (slower) reference builder.
