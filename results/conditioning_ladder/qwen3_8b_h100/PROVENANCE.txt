@@ -1,0 +1,10 @@
+Conditioning ladder, Qwen3-8B + Qwen3-8B-Domino-b16, one NVIDIA H100 80GB (NCHC Nano5)
+collected  2026-09-26, SLURM job 361731, same GPU class/software as results/raw/tab1_8b/
+protocol   8 datasets x n=50 (AIME25 30, MT-Bench both turns), T=0, max_new_tokens 2048,
+           budget 16, corr_topm 64, node_topk 8; methods ar, marg@16, condstatic@16,
+           dominotree@16, all in ONE session (benchmark.py --python-builder for every arm)
+pins       Domino-Tree 2ee34b3, Domino e4aad4851, torch 2.8.0+cu128, transformers 5.17.0
+purpose    tau decomposition only (Table 15); tau does not depend on the builder, so the
+           Python builder is sufficient. A second, all-fastest-builder pass was started and
+           deliberately stopped: the paper's ladder reports tau only.
+result     tau 6.98 -> 7.73 -> 8.07 (+10.7% correction, +4.4% path), unweighted over datasets

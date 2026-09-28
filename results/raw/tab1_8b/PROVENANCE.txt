@@ -1,0 +1,21 @@
+Qwen3-8B rows of the current (IEEE Access) Table 1, Table 2 and Table 14.
+
+One session, one GPU: every Qwen3-8B method at every temperature ran in a single SLURM job
+(job 361312, 2026-09-25/26, 8h15m) on one NVIDIA H100 80GB HBM3, collected by
+run_tab1_8b_h100.sbatch at the repo root.
+
+  tab1_8b/                          our harness: AR (T=0) + DominoTree@128, benchmark.py
+                                    --builder frontier (fused, DOMINOTREE_BUILDER_GRU_TABLE=1),
+                                    corr-topm 64, node-topk 8, 50 prompts (AIME25 30), 2048 tokens
+  tab1_8b_reference/                reference CaDDTree harness (commit a88f3f3): AR (T=0 only;
+                                    --skip-baseline at T>0), DFlash, DDTree@128, CaDDTree with
+                                    cost_models/Qwen3-8B_convex.pt; portable JSONL exported from the
+                                    harness's torch caches by export_reference_pt.py
+  tab1_8b_domino_official/qwen3-8b/ released Domino decoder (commit e4aad4851), graph and eager,
+                                    block 16, --use-bias, sdpa; the unused block-size-1 pass skipped
+                                    as in run_pipeline.sh (FAST_DOMINO copy)
+  budget8b_h100/                    DominoTree budget sweep 16/32/64/128/256, T=0, MATH-500 /
+                                    HumanEval / MT-Bench, 20 prompts each, same builder, job 361296
+
+Pins: Domino-Tree 2ee34b3, torch 2.8.0+cu128, transformers 5.17.0, flash-attn 2.8.3.
+Regenerate: python3 gen_table1.py ; python3 gen_ablation_tables.py

@@ -11,8 +11,8 @@
 #      the long-context table, and the long-context tree-budget sweep
 #   4  Tables 1, 2, 14 + the abstract's Table-1 claims
 #   5  Figure 1 (drawn from step 4's cells.json)
-#   6  Tables 3, 4, 10, 11, 12, 13, and the Qwen3-8B numbers quoted in prose
-#   7  Table 15: conditioning ladder, both builder configurations
+#   6  Tables 3, 4, 10, 11, 12, 13, and the Qwen3-8B budget sweep quoted in Setup + Limitations
+#   7  Table 15: conditioning ladder (tau, Qwen3-4B and Qwen3-8B)
 set -euo pipefail
 cd "$(dirname "$0")"
 OUT=results/reproduced
@@ -29,8 +29,5 @@ echo "== 4. Tables 1, 2, 14 ==";        python3 gen_table1.py --out-dir "$OUT/ta
 echo "== 5. Figure 1 ==";               python3 gen_figure1.py "$OUT/table1/cells.json" "$OUT/figure1_dual.pdf"
 echo "== 6. builder + ablation tables =="; python3 gen_ablation_tables.py --out-dir "$OUT/ablations" | tail -1
 echo "== 7. Table 15 ==";
-for cfg in matched_builder best_builder; do
-  python3 results/conditioning_ladder/ladder_ci.py "results/conditioning_ladder/$cfg" > "$OUT/table15_$cfg.txt"
-  echo "wrote $OUT/table15_$cfg.txt"
-done
+python3 results/conditioning_ladder/gen_ladder_table.py > "$OUT/table15_ladder.tex" && echo "wrote $OUT/table15_ladder.tex"
 echo "ALL STEPS COMPLETED -- compare $OUT/ against the paper's tables."

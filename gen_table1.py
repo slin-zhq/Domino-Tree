@@ -12,7 +12,8 @@ Usage:
 
 Means are over prompt/turn rows; Overall is the unweighted dataset mean. DominoTree uses
 same-session T=0 AR, reused at T>0. Reference baselines (DFlash/CaDDTree) use their own
-harness's AR; DDTree uses its own same-cell AR. Official Domino uses the common lean AR
+harness's AR; at 4B DDTree uses its own same-cell AR, at 8B the reference harness's T=0 AR
+(the 8B reference run times AR once, at T=0, and skips it at T>0). Official Domino uses the common lean AR
 from the DominoTree collection, best of eager/graph per cell. Its first prompt is excluded at BOTH sizes as an a-priori warmup rule; see official() for
 prompt 0 for both metrics. Paired CIs: ratio of pooled mean per-row TPS (vs. Domino) or
 per-row own-AR speedups (vs. reference baselines); dataset-stratified, conversation-
@@ -24,20 +25,22 @@ and 128 at Qwen3-8B (both DDTree and DominoTree; see the paper's tab:main). Raw 
 
     results/raw/tab1f_4b/                  DominoTree (+ AR), Qwen3-4B, fused GPU-native
                                             builder, budgets 16/32/64 (headline: 32)
-    results/raw/tab1_8b/                   DominoTree (+ AR), Qwen3-8B, budget 128
+    results/raw/tab1_8b/                   DominoTree (+ AR), Qwen3-8B, fused frontier
+                                            builder, budget 128
     results/raw/baseline_ddtree_caddtree/  AR/DFlash/CaDDTree, Qwen3-4B (own harness)
-    results/raw/8b/ref8b_perprompt_jsonl/  AR/DFlash/CaDDTree, Qwen3-8B (own harness)
+    results/raw/tab1_8b_reference/         AR (T=0)/DFlash/DDTree@128/CaDDTree, Qwen3-8B
+                                            (own harness)
     results/raw/domino_official/qwen3-4b/  official Domino decoder, graph+eager, Qwen3-4B
-    results/raw/8b/domino_official/qwen3-8b/  official Domino decoder, graph+eager, Qwen3-8B
+    results/raw/tab1_8b_domino_official/qwen3-8b/  official Domino decoder, graph+eager, Qwen3-8B
     results/raw/conditioning_ladder/matched/  marg@16 / condstatic@16 / dominotree@16
                                                (the conditioning-decomposition appendix)
 
-DDTree's budget-32 (4B) and budget-128 (8B) arms are exported as dependency-free
-per-prompt JSONL in `results/raw/ddtree_b32_4b/` and
-`results/raw/ddtree_b128_8b/`.  The JSONL preserves acceptance lengths, timing, and
+All Qwen3-8B rows (every method, every temperature) come from one session on a single
+NVIDIA H100 80GB. DDTree's budget-32 (4B) arm is exported as dependency-free per-prompt
+JSONL in `results/raw/ddtree_b32_4b/`; the 8B DDTree arm is in the 8B reference JSONL.  The JSONL preserves acceptance lengths, timing, and
 the protocol fields checked below; it intentionally omits the original tensors and
 harness-local paths. A private torch-pickle fallback exists only through the explicit
-`--ddtree-pickle-root4b`/`--ddtree-pickle-root8b` options.
+`--ddtree-pickle-root4b` option.
 """
 from __future__ import annotations
 import argparse, csv, hashlib, json, math, os, re
@@ -206,16 +209,15 @@ def main():
     ap.add_argument('--out-dir',type=Path,default=ROOT/'results/table1_audit')
     ap.add_argument('--bootstrap-iters',type=int,default=10000)
     ap.add_argument('--ddtree-pickle-root4b',type=Path,help='trusted private pickle directory; opt-in fallback only')
-    ap.add_argument('--ddtree-pickle-root8b',type=Path,help='trusted private pickle directory; opt-in fallback only')
     args=ap.parse_args();out=args.out_dir;out.mkdir(parents=True,exist_ok=True)
     data={};cells={};variants={};budget_check={}
     for size in ['4B','8B']:
         budget=32 if size=='4B' else 128
         dtroot=ROOT/'results/raw'/('tab1f_4b' if size=='4B' else 'tab1_8b')
-        refroot=ROOT/'results/raw/baseline_ddtree_caddtree' if size=='4B' else ROOT/'results/raw/8b/ref8b_perprompt_jsonl'
-        ddroot=ROOT/'results/raw'/('ddtree_b32_4b' if size=='4B' else 'ddtree_b128_8b')
-        pickleroot=args.ddtree_pickle_root4b if size=='4B' else args.ddtree_pickle_root8b
-        officialroot=ROOT/'results/raw/domino_official' if size=='4B' else ROOT/'results/raw/8b/domino_official'
+        refroot=ROOT/'results/raw/baseline_ddtree_caddtree' if size=='4B' else ROOT/'results/raw/tab1_8b_reference'
+        ddroot=ROOT/'results/raw/ddtree_b32_4b'
+        pickleroot=args.ddtree_pickle_root4b
+        officialroot=ROOT/'results/raw/domino_official' if size=='4B' else ROOT/'results/raw/tab1_8b_domino_official'
         for temp in TEMPS:
             for ds in DS:
                 oa=arm(dtroot/f'{ds}_T0.0.jsonl',ds,'ar')
@@ -223,8 +225,9 @@ def main():
                 data[size,temp,ds,'DominoTree']=(dr,oa)
                 ba=arm(refroot/f'{ds}_T{temp if size=="4B" else "0.0"}.jsonl',ds,'baseline')
                 for m,raw in [('DFlash','dflash'),('CaDDTree','caddtree')]: data[size,temp,ds,m]=(arm(refroot/f'{ds}_T{temp}.jsonl',ds,raw),ba)
-                data[size,temp,ds,'DDTree']=ddarms(ddroot/f'{ds}_T{temp}.jsonl',ds,temp,size,budget,
-                                                    pickleroot/f'{ds}_T{temp}.json' if pickleroot else None)
+                if size=='8B': data[size,temp,ds,'DDTree']=(arm(refroot/f'{ds}_T{temp}.jsonl',ds,f'ddtree_tb{budget}'),ba)
+                else: data[size,temp,ds,'DDTree']=ddarms(ddroot/f'{ds}_T{temp}.jsonl',ds,temp,size,budget,
+                                                         pickleroot/f'{ds}_T{temp}.json' if pickleroot else None)
                 modes={mode:official(officialroot,ds,temp,size,mode) for mode in ['graph','eager']}
                 winner=max(modes,key=lambda m:mean(modes[m],'tps'))
                 data[size,temp,ds,'Domino']=(modes[winner],oa)

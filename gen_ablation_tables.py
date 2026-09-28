@@ -16,12 +16,10 @@ results/raw/; nothing is read from a summary. Missing or unpaired cells are fata
       -> results/raw/candidate_width_saturation/   (m0 = full vocabulary)
   Table 13 (tab:draftsample)        sampled vs deterministic draft, chain and DominoTree(16)
       -> results/raw/draft_sampling_ablation/
-  Limitations: Qwen3-8B verify cost vs tree budget on the A6000 (83.4 / 76.0 / 84.1 ms)
-      -> results/raw/budget8b/
-  Section "Builder cost", Qwen3-8B prose: heap-era build saving (Python -> GPU-native heap)
-      and the budget-16 Python-builder control (accepted-length lead vs throughput delta)
-      -> results/raw/8b/collect_8b_2048_20260704/our/  (Python builder; arm named cond@16)
-         results/raw/8b/dominotree/                    (GPU-native heap builder)
+  Setup + Limitations: Qwen3-8B node-budget sweep 16/32/64/128/256 on one H100 (T=0,
+      MATH-500 / HumanEval / MT-Bench, 20 prompts each, fused frontier builder) -- the
+      evidence for Table 1's 8B budget of 128
+      -> results/raw/budget8b_h100/
 
 Paired deltas (Tables 4, 10, 11) are the ratio of mean per-row TPS with a 95% percentile
 bootstrap CLUSTERED by prompt (MT-Bench's two turns are one conversation), 10,000 draws,
@@ -194,42 +192,30 @@ def table13():
     return L + [r"\bottomrule", r"\end{tabular}"]
 
 
-def budget8b():
-    acc = collections.defaultdict(list)
-    for p in sorted((RAW / "budget8b").glob("*_T0.0.jsonl")):
-        for r in jsonl(p):
-            acc[r["method"]].append(r["ms_verify"])
-    return [f"{m}: mean verify {st.fmean(v):.1f} ms (n={len(v)})"
-            for m, v in sorted(acc.items(), key=lambda kv: (len(kv[0]), kv[0])) if m != "ar"]
-
-
-def prose_8b():
-    def load(pat, strip=""):
-        a = collections.defaultdict(dict)
-        for p in sorted(RAW.glob(pat)):
-            ds = p.name.replace(strip, "").split("_T")[0]
-            for r in jsonl(p):
-                a[r["method"]][(ds, r["sample_idx"], r["turn_index"])] = r
-        return a
-    py = load("8b/collect_8b_2048_20260704/our/*_T0.0.jsonl")
-    gn = load("8b/dominotree/*_T0.0.jsonl")
-    b_py = st.fmean(x["ms_build"] for x in py["cond@16"].values())
-    b_gn = st.fmean(x["ms_build"] for x in gn["dominotree@16"].values())
-    # Qwen3-4B, same builder pair (Python -> GPU-native heap), budget 16, T=0
-    p4 = st.fmean(r["ms_build"] for q in sorted(RAW.glob("dominotree_python_builder/*_T0.0.jsonl"))
-                  for r in jsonl(q) if r["method"] == "dominotree@16")
-    g4 = st.fmean(r["ms_build"] for q in sorted(RAW.glob("dominotree/*_T0.0.jsonl"))
-                  for r in jsonl(q) if r["method"] == "dominotree@16")
-    t, c = py["cond@16"], py["chain"]
-    if set(t) != set(c):
-        raise SystemExit("UNPAIRED 8B budget-16 control")
-    lead = 100 * (st.fmean(t[k]["mean_accept"] for k in t) / st.fmean(c[k]["mean_accept"] for k in t) - 1)
-    o, lo, hi = boot({k: (t[k]["tps"], c[k]["tps"]) for k in t})
-    return [f"4B build: Python {p4:.2f} ms -> GPU-native heap {g4:.2f} ms, saving {p4-g4:.2f} ms",
-            f"8B build: Python {b_py:.2f} ms -> GPU-native heap {b_gn:.2f} ms, saving {b_py-b_gn:.2f} ms"
-            f" ({(b_py-b_gn)/(p4-g4):.1f}x the 4B saving)",
-            f"8B budget-16 control (Python builder): accepted-length lead over chain {lead:+.2f}%",
-            f"   throughput delta vs chain {o:+.2f}% [95% CI {lo:+.2f}, {hi:+.2f}]"]
+def budget8b_h100():
+    """Mean per-row TPS and tau per budget; asserts the paper's sentence: budget 128 is fastest
+    on all three datasets, within 1% of budget 64 on MATH-500 and HumanEval."""
+    budgets = [16, 32, 64, 128, 256]
+    L = [r"\begin{tabular}{lccccc}", r"\toprule",
+         "Dataset & " + " & ".join(f"$B{{=}}{b}$" for b in budgets) + E, r"\midrule"]
+    best = {}
+    for ds, n in (("math500", 20), ("humaneval", 20), ("mt-bench", 40)):
+        rows = jsonl(RAW / "budget8b_h100" / f"{ds}_T0.0.jsonl")
+        tps, tau = {}, {}
+        for b in budgets:
+            rr = [r for r in rows if r["method"] == f"dominotree@{b}"]
+            if len(rr) != n or len({(r["sample_idx"], r["turn_index"]) for r in rr}) != n:
+                raise SystemExit(f"SHORT/DUPLICATE budget8b_h100 cell {ds} B={b}: {len(rr)}")
+            tps[b], tau[b] = st.fmean(r["tps"] for r in rr), st.fmean(r["mean_accept"] for r in rr)
+        best[ds] = (max(tps, key=tps.get), 100 * (tps[128] / tps[64] - 1))
+        L.append(f"{ds} & " + " & ".join(f"{tps[b]:.1f} / {tau[b]:.2f}" for b in budgets) + E)
+    if not all(b == 128 for b, _ in best.values()) or not all(
+            0 <= best[d][1] < 1 for d in ("math500", "humaneval")):
+        raise SystemExit(f"PAPER CLAIM FAILS (budget 128 fastest, within 1% of 64): {best}")
+    L += [r"\bottomrule", r"\end{tabular}",
+          "% cells: mean per-row TPS / mean tau.  128 vs 64: " +
+          ", ".join(f"{d} {v[1]:+.2f}%" for d, v in best.items())]
+    return L
 
 
 def main():
@@ -243,14 +229,9 @@ def main():
         text = "\n".join(fn()) + "\n"
         (out / f"{name}.tex").write_text(text)
         print(f"%% ---- {name} ----\n{text}")
-    lines = budget8b()
-    (out / "limitations_budget8b_verify.txt").write_text("\n".join(lines) + "\n")
-    print("%% ---- Limitations: Qwen3-8B verify cost vs budget (A6000) ----")
-    print("\n".join("%  " + l for l in lines))
-    p8 = prose_8b()
-    (out / "prose_8b_builder.txt").write_text("\n".join(p8) + "\n")
-    print("%% ---- Builder-cost section, Qwen3-8B prose numbers ----")
-    print("\n".join("%  " + l for l in p8))
+    text = "\n".join(budget8b_h100()) + "\n"
+    (out / "budget8b_h100_sweep.tex").write_text(text)
+    print(f"%% ---- Setup/Limitations: Qwen3-8B budget sweep (H100) ----\n{text}")
     print(f"%% wrote {out}")
 
 

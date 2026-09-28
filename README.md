@@ -33,7 +33,7 @@ sglang_dominotree/                               the SGLang plugin
   benchmarks/{bs1,concurrency,helmet}/           …the three serving benchmarks
   PROVENANCE.md, verify_vendored_head.py         …copied-code manifest + copy proof
 results/raw/, results/tables_gpunative/          harness raw data + derived tables (arXiv-era Table 1)
-results/raw/tab1f_4b/, results/raw/tab1_8b/      harness raw data for the CURRENT Table 1 (fused builder)
+results/raw/tab1f_4b/, results/raw/tab1_8b*/     harness raw data for the CURRENT Table 1 (fused builder)
 results/serving/                                 serving raw data + the no-GPU audit (single RTX 5090)
 demo/                                            side-by-side record-then-replay demo
 ```
@@ -48,7 +48,7 @@ to the paper's LaTeX source. Clone the repo and run these three, in any order:
 #    cell from raw per-prompt/per-cell JSONL and diff against the values printed in the
 #    paper.  (stdlib only, ~1 s)
 python3 results/serving/verify_published_numbers.py
-#    expected: ALL 1109 CELLS REPRODUCE FROM RAW DATA.
+#    expected: ALL 1112 CELLS REPRODUCE FROM RAW DATA.
 
 # 2. Copied code: prove the vendored Domino head is byte-identical to the official
 #    source at a pinned commit, modulo declared patches.  (stdlib only, ~1 s)
@@ -77,17 +77,17 @@ bash reproduce_paper.sh
 
 | Paper | Produced by | Raw data |
 |---|---|---|
-| Table 1, Table 2, Table 14, abstract claims | `gen_table1.py` | `results/raw/{tab1f_4b,tab1_8b,baseline_ddtree_caddtree,ddtree_b32_4b,ddtree_b128_8b,domino_official,8b/}` |
+| Table 1, Table 2, Table 14, abstract claims | `gen_table1.py` | `results/raw/{tab1f_4b,baseline_ddtree_caddtree,ddtree_b32_4b,domino_official}/` (4B), `results/raw/{tab1_8b,tab1_8b_reference,tab1_8b_domino_official}/` (8B) |
 | Figure 1 | `gen_figure1.py` (from `gen_table1.py`'s `cells.json`) | same as Table 1 |
 | Tables 3, 4, 10, 11 | `gen_ablation_tables.py` | `results/raw/tab_refresh/` (collected by `run_tab_refresh_remote.sh`) |
 | Tables 12, 13 | `gen_ablation_tables.py` | `results/raw/{candidate_width_saturation,draft_sampling_ablation}/` |
-| Qwen3-8B numbers in *Builder cost* and *Limitations* | `gen_ablation_tables.py` | `results/raw/{budget8b,8b/collect_8b_2048_20260704,8b/dominotree}/` |
+| Qwen3-8B budget sweep in *Setup* and *Limitations* | `gen_ablation_tables.py` | `results/raw/budget8b_h100/` |
 | Table 5 | `results/serving/gen_sglang_bs1_table.py` | `results/serving/bs1/` |
 | Table 6 (incl. Overall row) | `results/serving/gen_sglang_bs1_cis_table.py` | `results/serving/bs1/` |
 | Table 8 | `results/serving/gen_sglang_longctx_table.py` | `results/serving/PUBLISHED.json` (itself re-derived from `longcontext/` by the verifier) |
 | Tables 7, 9, and every serving value | `results/serving/verify_published_numbers.py` | `results/serving/` |
 | Tables 16, 17 | `results/serving/gen_appendix_5090.py` | `results/serving/{concurrency,longcontext}/` |
-| Table 15 | `results/conditioning_ladder/ladder_ci.py` (run on `matched_builder/` and `best_builder/`) | `results/conditioning_ladder/` |
+| Table 15 | `results/conditioning_ladder/gen_ladder_table.py` | `results/conditioning_ladder/{matched_builder,best_builder,qwen3_8b_h100}/` |
 
 Compare the **CSVs**, not the `.md` tables: the checked-in Markdown was run through a
 formatter that pads table columns, so it matches cell-for-cell but not byte-for-byte.
@@ -232,6 +232,12 @@ consumed by `run_tab1f_4b_remote.sh`, which drives `benchmark.py --builder front
 across all 8 datasets, 3 temperatures, and node budgets 16/32/64; `harvest_tab1f_4b.sh`
 then copies a finished remote run here and summarizes it with `agg_tab1f_4b.py`.
 
+The Qwen3-8B side was collected in one session on a single H100 80GB by
+`run_tab1_8b_h100.sbatch` (all methods, all temperatures, one SLURM job; it sets the same two
+env vars through its environment script). The reference harness saves torch caches;
+`export_reference_pt.py` turns them into the portable JSONL in `results/raw/tab1_8b_reference/`.
+See `results/raw/tab1_8b/PROVENANCE.txt`.
+
 ## SGLang serving
 
 DominoTree also runs inside SGLang as a speculative-decoding plugin: a separate package
@@ -294,7 +300,9 @@ is rebuilt from the shipped raw JSONL.
   Each carries a `PROVENANCE.txt` with the exact protocol and per-round build costs.
   Rebuild with `python3 make_conditioning_ladder_table.py` (stdlib only).
 - `results/raw/tab1f_4b/`, `results/raw/tab1_8b/` — the CURRENT Table 1 headline data
-  (node budget 32 at Qwen3-4B, 128 at Qwen3-8B, fused GPU-native builder); rebuild with
+  (node budget 32 at Qwen3-4B, 128 at Qwen3-8B, fused GPU-native builder; the 8B baselines
+  are in `tab1_8b_reference/` and `tab1_8b_domino_official/`, all 8B rows from one H100
+  session, and `budget8b_h100/` holds the 8B budget sweep); rebuild with
   `gen_table1.py` (needs numpy + torch; see "Reproducing the CURRENT Table 1 headline"
   above). `results/raw/dominotree/` above remains the arXiv-era (budget 16) data and
   keeps `make_latex_table.py` reproducing that version exactly.
@@ -309,7 +317,7 @@ Both halves of the evidence — the offline tables above and the serving tables 
 re-derived on a laptop: no GPU, no model weights, no access to the paper's LaTeX source.
 For serving, this recomputes every published cell from the raw per-prompt JSONL and diffs
 them against the values printed in the paper (stdlib only, expected output
-`ALL 1109 CELLS REPRODUCE FROM RAW DATA.`):
+`ALL 1112 CELLS REPRODUCE FROM RAW DATA.`):
 
 ```bash
 python3 results/serving/verify_published_numbers.py
