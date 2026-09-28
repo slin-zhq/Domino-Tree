@@ -1,0 +1,27 @@
+Qwen3-4B rows of the current (IEEE Access) Table 1, Table 2 and Table 14.
+
+One session, one GPU: our harness (AR + DominoTree@32) and the released Domino decoder
+(eager and --use-graph) ran interleaved, cell by cell (dataset x temperature), in a single
+run on one NVIDIA RTX 5080 (MIRLab, GPU index 1), 2026-09-28, by
+run_tab1_4b_onesession.sh at the repo root. This replaces the prior arrangement, where
+DominoTree/AR (collected 2026-09-17) and the released Domino decoder (collected
+2026-07-09) came from two different sessions and are no longer used for Table 1's 4B
+rows (see results/raw/tab1f_4b/ and results/raw/domino_official/README.md).
+
+  tab1_4b/                          our harness: AR (T=0) + DominoTree@32, benchmark.py
+                                     --builder frontier (fused, DOMINOTREE_BUILDER_GRU_TABLE=1),
+                                     corr-topm 64, node-topk 8, 50 prompts (AIME25 30), 2048 tokens
+  tab1_4b_domino_official/qwen3-4b/ released Domino decoder (commit 44e1e6912ba9d301899739a54bfda2ce8826980a),
+                                     eager and --use-graph, block 16, --use-bias, sdpa; the unused
+                                     block-size-1 pass skipped as in run_pipeline.sh (FAST_DOMINO copy)
+  tab1_4b/COLLECTION/                MANIFEST.txt (host/GPU/pip-freeze/hash provenance),
+                                     gpu_state_per_cell.log (per-cell clocks/power),
+                                     gpu_util.csv (whole-run utilization sampler, 30 s cadence)
+
+Pins: Domino-Tree 2ee34b3, Domino 44e1e6912ba9d301899739a54bfda2ce8826980a, torch 2.9.1,
+transformers 5.3.0, flash-attn-4 4.0.0b16 (5080 sm_120 build; see MANIFEST.txt).
+
+Note: home-directory paths in MANIFEST.txt are abbreviated to ~/, and per-arm stdout logs
+are not shipped; the per-prompt JSONL above carries every number the paper uses.
+
+Regenerate: python3 gen_table1.py ; python3 gen_ablation_tables.py

@@ -1,0 +1,30 @@
+date: 2026-09-28T01:46:16+08:00
+host: lab machine with 2x RTX 5080
+gpu_index: 1
+GPU 0: NVIDIA GeForce RTX 5080 (UUID: GPU-9d2d998b-4f93-7d88-717c-55e81eff90c0)
+GPU 1: NVIDIA GeForce RTX 5080 (UUID: GPU-9aaa0bc0-d041-9694-82dd-79c2698a2d54)
+--- pip freeze (torch/transformers/flash) ---
+flash-attn-4==4.0.0b16
+flashinfer-cubin==0.6.7.post3
+flashinfer-python==0.6.7.post3
+torch==2.9.1
+torch_c_dlpack_ext==0.1.5
+torch_memory_saver==0.0.9
+torchao==0.9.0
+torchaudio==2.9.1
+torchcodec==0.9.1
+torchvision==0.24.1
+transformers==5.3.0
+--- Domino-Tree harness provenance ---
+harness dir: ~/tab1f/Domino-Tree (not a git checkout on this host)
+verified byte-identical (sha256sum) to public Domino-Tree commit 2ee34b369f57f805406d650d46db5dfaaafcc133
+  (benchmark.py, dominotree_gpu.py, dominotree_frontier.py, sglang_dominotree/.../frontier.py all match)
+6b3edf11023c41bbe67b2a3abcfb8d94bcf98d74efa5d57118b48d7a226121fe  ~/tab1f/Domino-Tree/benchmark.py
+4d66658fcd185b4d3475dc8ae2af76bafb77eef4a43cc321a88a02c8c63747e7  ~/tab1f/Domino-Tree/dominotree_gpu.py
+648db4c9edc0711199aa8319849dc21749f9ddf8ca6fd004f5f99592425b5338  ~/tab1f/Domino-Tree/dominotree_frontier.py
+c91473e5a5e3d2dae02da95f52ca7af924c362c44d13de164f731a12dbb403e8  ~/tab1f/Domino-Tree/sglang_dominotree/src/dominotree_sglang/tree/frontier.py
+--- released Domino code provenance ---
+domino code dir: ~/SpecDec-Optimize/ref_repo/Domino/code (not a git checkout on this host)
+verified byte-identical (sha256sum) to local SpecDec-Optimize/ref_repo/Domino @ commit 44e1e6912ba9d301899739a54bfda2ce8826980a
+f5cf76fb6b7592197649e4d901b9997f5e970664d337e11e9d045b5625ef0a2d  ~/SpecDec-Optimize/ref_repo/Domino/code/benchmark.py
+05f79b879b70bb45fdc0ffed736136dee2890834fe8c607e3d93c51613cff683  ~/SpecDec-Optimize/ref_repo/Domino/code/dflash.py

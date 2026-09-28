@@ -23,24 +23,29 @@ records -- an unpaired cell is a fatal error, not a silent skip.
 Headline node budget in the current (IEEE Access) revision of Table 1 is 32 at Qwen3-4B
 and 128 at Qwen3-8B (both DDTree and DominoTree; see the paper's tab:main). Raw sources:
 
-    results/raw/tab1f_4b/                  DominoTree (+ AR), Qwen3-4B, fused GPU-native
-                                            builder, budgets 16/32/64 (headline: 32)
+    results/raw/tab1_4b/                   DominoTree (+ AR), Qwen3-4B, fused frontier
+                                            builder, budget 32
     results/raw/tab1_8b/                   DominoTree (+ AR), Qwen3-8B, fused frontier
                                             builder, budget 128
     results/raw/baseline_ddtree_caddtree/  AR/DFlash/CaDDTree, Qwen3-4B (own harness)
     results/raw/tab1_8b_reference/         AR (T=0)/DFlash/DDTree@128/CaDDTree, Qwen3-8B
                                             (own harness)
-    results/raw/domino_official/qwen3-4b/  official Domino decoder, graph+eager, Qwen3-4B
+    results/raw/tab1_4b_domino_official/qwen3-4b/  official Domino decoder, graph+eager, Qwen3-4B
     results/raw/tab1_8b_domino_official/qwen3-8b/  official Domino decoder, graph+eager, Qwen3-8B
     results/raw/conditioning_ladder/matched/  marg@16 / condstatic@16 / dominotree@16
                                                (the conditioning-decomposition appendix)
 
-All Qwen3-8B rows (every method, every temperature) come from one session on a single
-NVIDIA H100 80GB. DDTree's budget-32 (4B) arm is exported as dependency-free per-prompt
-JSONL in `results/raw/ddtree_b32_4b/`; the 8B DDTree arm is in the 8B reference JSONL.  The JSONL preserves acceptance lengths, timing, and
-the protocol fields checked below; it intentionally omits the original tensors and
-harness-local paths. A private torch-pickle fallback exists only through the explicit
-`--ddtree-pickle-root4b` option.
+All Qwen3-4B rows of our harness (AR + DominoTree@32) and the released Domino decoder come
+from one session (2026-09-28, a single NVIDIA RTX 5080, interleaved per dataset and
+temperature; see `results/raw/tab1_4b/PROVENANCE.txt`). `results/raw/tab1f_4b/` (an
+earlier, separate session) is kept only for the node-budget sweep (16/32/64) appendix,
+read with its own T=0 AR -- see the `budget_check` block below. All Qwen3-8B rows (every
+method, every temperature) come from one session on a single NVIDIA H100 80GB. DDTree's
+budget-32 (4B) arm is exported as dependency-free per-prompt JSONL in
+`results/raw/ddtree_b32_4b/`; the 8B DDTree arm is in the 8B reference JSONL. The JSONL
+preserves acceptance lengths, timing, and the protocol fields checked below; it
+intentionally omits the original tensors and harness-local paths. A private torch-pickle
+fallback exists only through the explicit `--ddtree-pickle-root4b` option.
 """
 from __future__ import annotations
 import argparse, csv, hashlib, json, math, os, re
@@ -213,11 +218,11 @@ def main():
     data={};cells={};variants={};budget_check={}
     for size in ['4B','8B']:
         budget=32 if size=='4B' else 128
-        dtroot=ROOT/'results/raw'/('tab1f_4b' if size=='4B' else 'tab1_8b')
+        dtroot=ROOT/'results/raw'/('tab1_4b' if size=='4B' else 'tab1_8b')
         refroot=ROOT/'results/raw/baseline_ddtree_caddtree' if size=='4B' else ROOT/'results/raw/tab1_8b_reference'
         ddroot=ROOT/'results/raw/ddtree_b32_4b'
         pickleroot=args.ddtree_pickle_root4b
-        officialroot=ROOT/'results/raw/domino_official' if size=='4B' else ROOT/'results/raw/tab1_8b_domino_official'
+        officialroot=ROOT/'results/raw'/('tab1_4b_domino_official' if size=='4B' else 'tab1_8b_domino_official')
         for temp in TEMPS:
             for ds in DS:
                 oa=arm(dtroot/f'{ds}_T0.0.jsonl',ds,'ar')
@@ -236,7 +241,10 @@ def main():
                     cells[size,temp,ds,m]=cell(*data[size,temp,ds,m])
                     if m=='Domino': cells[size,temp,ds,m]['mode']=winner
                 if size=='4B' and temp=='0.0':
-                    for b in [16,32,64]: budget_check[temp,ds,b]=cell(arm(dtroot/f'{ds}_T{temp}.jsonl',ds,f'dominotree@{b}'),oa)
+                    # The 16/32/64 budget sweep stays on the separate tab1f_4b session, with
+                    # its own T=0 AR (self-consistent), rather than the one-session tab1_4b data.
+                    oldroot=ROOT/'results/raw/tab1f_4b'; oldoa=arm(oldroot/f'{ds}_T0.0.jsonl',ds,'ar')
+                    for b in [16,32,64]: budget_check[temp,ds,b]=cell(arm(oldroot/f'{ds}_T{temp}.jsonl',ds,f'dominotree@{b}'),oldoa)
             for m in METHODS:
                 cells[size,temp,'Overall',m]={k:fmean(cells[size,temp,d,m][k] for d in DS) for k in ['tps','tau','speedup','ar_tps']}
                 cells[size,temp,'Overall',m]['n']=sum(cells[size,temp,d,m]['n'] for d in DS)

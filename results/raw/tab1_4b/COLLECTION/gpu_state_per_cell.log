@@ -1,0 +1,72 @@
+[2026-09-28T01:46:17+08:00] cell gsm8k T=0.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+180 MHz, 405 MHz, 9.34 W, 360.00 W, 37, 0 %, 15 MiB
+[2026-09-28T01:51:19+08:00] cell gsm8k T=0.5 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2865 MHz, 14801 MHz, 136.99 W, 360.00 W, 53, 0 %, 15 MiB
+[2026-09-28T01:53:26+08:00] cell gsm8k T=1.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2880 MHz, 14801 MHz, 133.17 W, 360.00 W, 52, 0 %, 15 MiB
+[2026-09-28T01:55:54+08:00] cell math500 T=0.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2880 MHz, 14801 MHz, 139.41 W, 360.00 W, 52, 0 %, 15 MiB
+[2026-09-28T02:09:09+08:00] cell math500 T=0.5 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2872 MHz, 14801 MHz, 137.26 W, 360.00 W, 54, 0 %, 15 MiB
+[2026-09-28T02:14:53+08:00] cell math500 T=1.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2865 MHz, 14801 MHz, 129.33 W, 360.00 W, 55, 0 %, 15 MiB
+[2026-09-28T02:22:38+08:00] cell aime25 T=0.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2872 MHz, 14801 MHz, 110.58 W, 360.00 W, 53, 0 %, 15 MiB
+[2026-09-28T02:43:45+08:00] cell aime25 T=0.5 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2880 MHz, 14801 MHz, 132.76 W, 360.00 W, 53, 0 %, 15 MiB
+[2026-09-28T02:54:47+08:00] cell aime25 T=1.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2865 MHz, 14801 MHz, 132.75 W, 360.00 W, 54, 30 %, 15 MiB
+[2026-09-28T03:09:49+08:00] cell humaneval T=0.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2880 MHz, 15001 MHz, 127.84 W, 360.00 W, 54, 0 %, 15 MiB
+[2026-09-28T03:17:48+08:00] cell humaneval T=0.5 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2880 MHz, 14801 MHz, 146.31 W, 360.00 W, 55, 0 %, 15 MiB
+[2026-09-28T03:21:30+08:00] cell humaneval T=1.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2880 MHz, 14801 MHz, 132.04 W, 360.00 W, 55, 0 %, 15 MiB
+[2026-09-28T03:25:34+08:00] cell mbpp T=0.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2880 MHz, 14801 MHz, 124.60 W, 360.00 W, 55, 0 %, 15 MiB
+[2026-09-28T03:30:52+08:00] cell mbpp T=0.5 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2872 MHz, 14801 MHz, 137.79 W, 360.00 W, 55, 0 %, 15 MiB
+[2026-09-28T03:33:20+08:00] cell mbpp T=1.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2865 MHz, 14801 MHz, 132.47 W, 360.00 W, 55, 0 %, 15 MiB
+[2026-09-28T03:36:02+08:00] cell livecodebench T=0.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2865 MHz, 14801 MHz, 126.05 W, 360.00 W, 55, 0 %, 15 MiB
+[2026-09-28T03:44:47+08:00] cell livecodebench T=0.5 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2880 MHz, 14801 MHz, 147.40 W, 360.00 W, 55, 0 %, 15 MiB
+[2026-09-28T03:48:29+08:00] cell livecodebench T=1.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2880 MHz, 14801 MHz, 139.02 W, 360.00 W, 55, 0 %, 15 MiB
+[2026-09-28T03:52:46+08:00] cell mt-bench T=0.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2880 MHz, 15001 MHz, 137.93 W, 360.00 W, 54, 0 %, 15 MiB
+[2026-09-28T04:16:18+08:00] cell mt-bench T=0.5 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2880 MHz, 14801 MHz, 125.35 W, 360.00 W, 55, 0 %, 15 MiB
+[2026-09-28T04:30:09+08:00] cell mt-bench T=1.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2872 MHz, 14801 MHz, 139.12 W, 360.00 W, 55, 0 %, 15 MiB
+[2026-09-28T04:46:37+08:00] cell alpaca T=0.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2865 MHz, 14801 MHz, 123.53 W, 360.00 W, 55, 0 %, 15 MiB
+[2026-09-28T04:54:52+08:00] cell alpaca T=0.5 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2872 MHz, 14801 MHz, 134.61 W, 360.00 W, 56, 0 %, 15 MiB
+[2026-09-28T04:59:58+08:00] cell alpaca T=1.0 GPU=1 clocks/power:
+clocks.current.sm [MHz], clocks.current.memory [MHz], power.draw [W], power.limit [W], temperature.gpu, utilization.gpu [%], memory.used [MiB]
+2880 MHz, 14801 MHz, 136.37 W, 360.00 W, 55, 0 %, 15 MiB

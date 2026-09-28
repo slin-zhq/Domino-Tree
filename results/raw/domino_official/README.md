@@ -29,3 +29,12 @@ Collected 2026-07-09 single-GPU with the sibling GPU idle — 4B on a dual-5080 
 idle), 8B on an A6000 (single-GPU by construction): we saw run-to-run variance for Domino's
 CUDA-graph runner on a shared node, so we removed the contention rather than average over it.
 The derived rows regenerate from these files with `make_latex_table.py` (repository root).
+
+**This directory's `qwen3-4b/` data is superseded for the current Table 1** by
+`results/raw/tab1_4b_domino_official/qwen3-4b/`, collected 2026-09-28 in the same session as
+that Table's DominoTree/AR run (`results/raw/tab1_4b/`) rather than in a separate session on
+different machine state. `gen_table1.py` reads `tab1_4b_domino_official/`, not this directory,
+for the current Table 1's 4B Domino row. This directory is kept for the arXiv-era
+`make_latex_table.py` pipeline (budget 16, both sizes) and for the 8B rows, which are
+themselves separately superseded by `results/raw/tab1_8b_domino_official/` (see that
+directory and `results/raw/tab1_8b/PROVENANCE.txt`).

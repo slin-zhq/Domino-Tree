@@ -26,14 +26,16 @@ benchmark.py, dominotree.py, dominotree_gpu.py   the HF research harness
   make_latex_table.py                            …raw JSONL -> Table 1 as published at arXiv (budget 16)
   gen_table1.py                                  …raw JSONL -> the CURRENT Table 1 (budget 32/128; needs torch+numpy)
   run_tab1f_4b_remote.sh, harvest_tab1f_4b.sh,
-  agg_tab1f_4b.py                                …the Qwen3-4B fused-builder recollection behind gen_table1.py
+  agg_tab1f_4b.py                                …the Qwen3-4B budget-sweep (16/32/64) recollection
+  run_tab1_4b_onesession.sh                      …the one-session Qwen3-4B Table 1 recollection (AR +
+                                                    DominoTree@32 + released Domino, one GPU)
   make_conditioning_ladder_table.py              …raw JSONL -> the paper's conditioning-ladder table
 sglang_dominotree/                               the SGLang plugin
   src/dominotree_sglang/                         …algorithm registration + tree builder
   benchmarks/{bs1,concurrency,helmet}/           …the three serving benchmarks
   PROVENANCE.md, verify_vendored_head.py         …copied-code manifest + copy proof
 results/raw/, results/tables_gpunative/          harness raw data + derived tables (arXiv-era Table 1)
-results/raw/tab1f_4b/, results/raw/tab1_8b*/     harness raw data for the CURRENT Table 1 (fused builder)
+results/raw/tab1_4b/, results/raw/tab1_8b/       harness raw data for the CURRENT Table 1 (fused builder)
 results/serving/                                 serving raw data + the no-GPU audit (single RTX 5090)
 demo/                                            side-by-side record-then-replay demo
 ```
@@ -77,7 +79,7 @@ bash reproduce_paper.sh
 
 | Paper | Produced by | Raw data |
 |---|---|---|
-| Table 1, Table 2, Table 14, abstract claims | `gen_table1.py` | `results/raw/{tab1f_4b,baseline_ddtree_caddtree,ddtree_b32_4b,domino_official}/` (4B), `results/raw/{tab1_8b,tab1_8b_reference,tab1_8b_domino_official}/` (8B) |
+| Table 1, Table 2, Table 14, abstract claims | `gen_table1.py` | `results/raw/{tab1_4b,baseline_ddtree_caddtree,ddtree_b32_4b,tab1_4b_domino_official}/` (4B), `results/raw/{tab1_8b,tab1_8b_reference,tab1_8b_domino_official}/` (8B) |
 | Figure 1 | `gen_figure1.py` (from `gen_table1.py`'s `cells.json`) | same as Table 1 |
 | Tables 3, 4, 10, 11 | `gen_ablation_tables.py` | `results/raw/tab_refresh/` (collected by `run_tab_refresh_remote.sh`) |
 | Tables 12, 13 | `gen_ablation_tables.py` | `results/raw/{candidate_width_saturation,draft_sampling_ablation}/` |
@@ -215,10 +217,9 @@ its own `spec_generate(block_size=1)` — see the normalization note further dow
 ### Reproducing the CURRENT Table 1 headline (fused GPU-native builder)
 
 The headline node budget in the current paper is wider than at arXiv — 32 at Qwen3-4B,
-128 at Qwen3-8B (`results/raw/tab1f_4b/`, `results/raw/tab1_8b/`; see
-[`gen_table1.py`](gen_table1.py) and `results/README.md`). Collecting the Qwen3-4B side
-yourself (`run_tab1f_4b_remote.sh`) needs two environment variables the default
-`run_benchmark.sh` path above does not:
+128 at Qwen3-8B (`results/raw/tab1_4b/`, `results/raw/tab1_8b/`; see
+[`gen_table1.py`](gen_table1.py) and `results/README.md`). Both env vars below are needed
+beyond the default `run_benchmark.sh` path above:
 
 ```bash
 export DOMINOTREE_FRONTIER_SRC=/path/to/sglang_dominotree/src/dominotree_sglang/tree/frontier.py
@@ -227,10 +228,17 @@ export DOMINOTREE_BUILDER_GRU_TABLE=1   # opt-in GRU input table (+1.55% TPS, ta
 
 `DOMINOTREE_FRONTIER_SRC` points the offline research harness at the SGLang plugin's
 frontier-builder module so it benchmarks the same fused GPU-native builder the serving
-plugin uses, rather than the harness's own (slower) reference builder. Both env vars are
-consumed by `run_tab1f_4b_remote.sh`, which drives `benchmark.py --builder frontier`
-across all 8 datasets, 3 temperatures, and node budgets 16/32/64; `harvest_tab1f_4b.sh`
-then copies a finished remote run here and summarizes it with `agg_tab1f_4b.py`.
+plugin uses, rather than the harness's own (slower) reference builder.
+
+The Qwen3-4B side of Table 1 (AR + DominoTree@32 + the released Domino decoder, every
+temperature) was collected in one session on a single GPU by
+[`run_tab1_4b_onesession.sh`](run_tab1_4b_onesession.sh), which sets both env vars and
+interleaves all four arms per (dataset, temperature) cell so no comparison crosses a
+session boundary; see `results/raw/tab1_4b/PROVENANCE.txt`. The separate node-budget
+sweep (16/32/64) in the budget-ablation appendix still uses the earlier, dedicated
+collection in `results/raw/tab1f_4b/` (`run_tab1f_4b_remote.sh`, `harvest_tab1f_4b.sh`,
+`agg_tab1f_4b.py`), which drives `benchmark.py --builder frontier` across all 8 datasets,
+3 temperatures, and node budgets 16/32/64.
 
 The Qwen3-8B side was collected in one session on a single H100 80GB by
 `run_tab1_8b_h100.sbatch` (all methods, all temperatures, one SLURM job; it sets the same two
@@ -299,13 +307,15 @@ is rebuilt from the shipped raw JSONL.
   `graphbest/` puts every arm at its fastest builder, which is what a deployment sees.
   Each carries a `PROVENANCE.txt` with the exact protocol and per-round build costs.
   Rebuild with `python3 make_conditioning_ladder_table.py` (stdlib only).
-- `results/raw/tab1f_4b/`, `results/raw/tab1_8b/` — the CURRENT Table 1 headline data
-  (node budget 32 at Qwen3-4B, 128 at Qwen3-8B, fused GPU-native builder; the 8B baselines
-  are in `tab1_8b_reference/` and `tab1_8b_domino_official/`, all 8B rows from one H100
-  session, and `budget8b_h100/` holds the 8B budget sweep); rebuild with
-  `gen_table1.py` (needs numpy + torch; see "Reproducing the CURRENT Table 1 headline"
-  above). `results/raw/dominotree/` above remains the arXiv-era (budget 16) data and
-  keeps `make_latex_table.py` reproducing that version exactly.
+- `results/raw/tab1_4b/`, `results/raw/tab1_8b/` — the CURRENT Table 1 headline data
+  (node budget 32 at Qwen3-4B, 128 at Qwen3-8B, fused GPU-native builder; every 4B row —
+  AR, DominoTree@32, and the released Domino decoder in `tab1_4b_domino_official/` — comes
+  from one RTX 5080 session, and likewise every 8B row — AR, DominoTree@128, and the
+  baselines in `tab1_8b_reference/` and `tab1_8b_domino_official/` — comes from one H100
+  session; `budget8b_h100/` holds the 8B budget sweep and `tab1f_4b/` the separate 4B
+  budget sweep); rebuild with `gen_table1.py` (needs numpy + torch; see "Reproducing the
+  CURRENT Table 1 headline" above). `results/raw/dominotree/` above remains the arXiv-era
+  (budget 16) data and keeps `make_latex_table.py` reproducing that version exactly.
 - `results/serving/` — the SGLang serving raw data: a **single RTX 5090 (32 GB), TP=1,
   for both Qwen3-4B and Qwen3-8B** (no tensor parallelism), covering the three serving
   benchmarks (single request, goodput under concurrency, HELMET long context) and all

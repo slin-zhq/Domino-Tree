@@ -26,16 +26,17 @@ Raw sources (new, added alongside the arXiv-era `raw/` directories below):
 
 | dir | contents | backs |
 | --- | --- | --- |
-| `raw/tab1f_4b/` | `ar` + `dominotree@{16,32,64}`, GPU-native fused builder, Qwen3-4B | current Table 1 4B (DominoTree row, headline @32), the budget-ablation appendix (@16/@32/@64) |
+| `raw/tab1_4b/` | `ar` + `dominotree@32`, fused frontier builder, Qwen3-4B, one RTX 5080 (see its `PROVENANCE.txt`) | current Table 1 4B (DominoTree row, headline @32) |
+| `raw/tab1f_4b/` | `ar` + `dominotree@{16,32,64}`, GPU-native fused builder, Qwen3-4B, separate earlier session | the budget-ablation appendix (@16/@32/@64) only |
 | `raw/tab1_8b/` | `ar` + `dominotree@128`, GPU-native fused builder, Qwen3-8B, one H100 80GB (see its `PROVENANCE.txt`) | current Table 1 8B (DominoTree row, headline @128) |
 | `raw/ddtree_b32_4b/` | `baseline` + `ddtree_tb32`, portable export of the official CaDDTree harness cache, Qwen3-4B | current Table 1 4B DDTree row and paired CIs |
 | `raw/tab1_8b_reference/` | `baseline` (T=0) + `dflash` + `ddtree_tb128` + `caddtree`, portable export of the official CaDDTree harness caches, Qwen3-8B, same H100 session | current Table 1 8B DFlash/DDTree/CaDDTree rows and paired CIs |
+| `raw/tab1_4b_domino_official/qwen3-4b/` | official Domino decoder, `graph_`/`eager_`, Qwen3-4B, same RTX 5080 session as `tab1_4b/` | current Table 1 4B Domino row, Table 14 |
 | `raw/tab1_8b_domino_official/qwen3-8b/` | official Domino decoder, `graph_`/`eager_`, Qwen3-8B, same H100 session | current Table 1 8B Domino row, Table 14 |
 | `raw/budget8b_h100/` | `dominotree@{16,32,64,128,256}`, T=0, MATH-500/HumanEval/MT-Bench, 20 prompts, same H100 | the 8B budget sweep quoted in Setup and Limitations |
 
 `gen_table1.py` requires **numpy only** and reads, besides the directories above:
-`raw/baseline_ddtree_caddtree/` (4B AR/DFlash/CaDDTree),
-`raw/domino_official/qwen3-4b/` (official Domino, 4B), and
+`raw/baseline_ddtree_caddtree/` (4B AR/DFlash/CaDDTree) and
 `raw/conditioning_ladder/matched/` (the conditioning-decomposition appendix) — all
 already present in this repo.
 
