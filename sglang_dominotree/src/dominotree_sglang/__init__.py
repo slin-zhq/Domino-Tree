@@ -211,6 +211,126 @@ def _install_dflash_custom_mask_graph_hook() -> None:
     _du.resolve_dflash_verify_mask_policy = _wrapper
 
 
+# Set by _install_hybrid_tree_verify_hooks; read by the worker's hybrid guard.
+_HYBRID_TREE_HOOKS_INSTALLED = False
+# DIAGNOSTIC ONLY (never for published numbers): DOMINOTREE_DIAG_FLAT_GDN=1 skips
+# the hooks so the GDN layers verify the tree as a flat chain, i.e. the P9 bug.
+# It is the negative control that shows the losslessness gate can detect it.
+_HYBRID_DIAG_FLAT_GDN = os.environ.get("DOMINOTREE_DIAG_FLAT_GDN", "0") == "1"
+
+
+def _is_dominotree_server() -> bool:
+    try:
+        from sglang.srt.server_args import get_global_server_args
+
+        return get_global_server_args().speculative_algorithm == "DOMINOTREE"
+    except Exception:
+        return False
+
+
+def _install_hybrid_tree_verify_hooks() -> None:
+    """Make hybrid Gated-DeltaNet targets verify our tree as a TREE (P9).
+
+    **Why.** Three quarters of Qwen3.6-27B's layers are recurrent (GDN). A
+    recurrent layer has no attention mask, so it only respects tree topology if
+    the engine walks parent pointers. Upstream switches that on from
+    ``speculative_eagle_topk > 1``, a startup-time fanout integer that DFLASH
+    forces to 1 and that no single value of which describes our irregular tree.
+    Left at 1, the GDN kernels process the n flattened nodes as one flat chain:
+    each node absorbs the state of whatever precedes it, INCLUDING rejected
+    siblings, so the verify logits and the committed state are both wrong and
+    nothing fails (``p9_hybrid_gdn_design.md``, "decisive finding").
+
+    **What (the two startup-time mechanisms that key on topk).**
+
+    1. ``MambaAttnBackendBase.topk`` gates reading ``retrieve_next_token`` /
+       ``retrieve_next_sibling`` into the forward metadata, eager and CUDA-graph
+       (``hybrid_linear_attn_backend.py:125,423,489``). We raise it on the TARGET
+       GDN backend only. It is read nowhere else in that class.
+    2. ``conv_window_dedup_enabled`` picks the conv-intermediate layout when the
+       memory pool is ALLOCATED. The deduplicated sliding-window layout is only
+       correct for a linear chain (its own docstring); we force the dense layout.
+       ``fused_conv_window_scatter_with_mask`` reads either layout through
+       strides, so the post-verify commit needs no change.
+
+    The third mechanism (verify-path metadata propagation, ``gdn_backend.py``)
+    consumes the forward metadata from (1). The state commit itself is called
+    from the worker (``commit_mamba_states_after_verify``).
+
+    The GDN kernels walk nodes in flattened order and load each node's PARENT
+    state, so a parent must precede its children. Upstream's own
+    ``reconstruct_indices_from_tree_mask`` (which derives our retrieve links)
+    already requires that order, and both of our builders emit it.
+
+    **Why here, not handle_server_args, and why not raise topk globally.**
+    ``speculative_eagle_topk`` is read in 36 files (CUDA-graph sizing, KV
+    reservation, backend predicates) along the DFLASH-derived path our worker
+    reuses. Patching the two consumers that matter keeps everything else on the
+    exact configuration the published numbers were measured on. The pool and
+    backend are built in the scheduler SUBPROCESS, where ``register_plugin``
+    runs before model load (see ``_install_dflash_custom_mask_graph_hook``), and
+    the global server args are set before the memory pool is allocated
+    (``model_runner.py:525`` vs ``:812``).
+
+    **Scope.** Active only while the server's algorithm is ``DOMINOTREE``, and it
+    only reaches objects that exist for hybrid-GDN targets (``MambaPool``,
+    ``GDNAttnBackend``). Conventional attention targets such as Qwen3-4B/8B never
+    construct either, so they are untouched by construction; a DOMINO/DFLASH/
+    EAGLE server is untouched by the algorithm check.
+    """
+    global _HYBRID_TREE_HOOKS_INSTALLED
+    if _HYBRID_DIAG_FLAT_GDN:
+        logger.warning(
+            "DOMINOTREE_DIAG_FLAT_GDN=1: hybrid tree-verify hooks NOT installed. "
+            "GDN layers will verify trees as a flat chain. DIAGNOSTIC ONLY -- "
+            "output is NOT lossless; never publish numbers from this server."
+        )
+        return
+    try:
+        import sglang.srt.mem_cache.memory_pool as _mp
+        from sglang.srt.layers.attention.linear.gdn_backend import GDNAttnBackend
+    except Exception as e:  # pragma: no cover - defensive
+        # The worker refuses hybrid targets while the flag stays False.
+        logger.warning("DOMINOTREE: hybrid tree-verify hooks not installed (%s).", e)
+        return
+
+    orig_dedup = getattr(_mp, "conv_window_dedup_enabled", None)
+    if orig_dedup is None:
+        logger.warning(
+            "DOMINOTREE: memory_pool.conv_window_dedup_enabled not found; "
+            "hybrid tree-verify hooks not installed."
+        )
+        return
+    if not getattr(orig_dedup, "_dominotree_wrapped", False):
+
+        def _dedup(is_npu, is_cpu, speculative_eagle_topk):
+            if _is_dominotree_server():
+                return False  # dense per-node conv windows: tree-safe
+            return orig_dedup(is_npu, is_cpu, speculative_eagle_topk)
+
+        _dedup._dominotree_wrapped = True
+        _mp.conv_window_dedup_enabled = _dedup
+
+    orig_init = GDNAttnBackend.__init__
+    if not getattr(orig_init, "_dominotree_wrapped", False):
+
+        def _gdn_init(self, model_runner, *args, **kwargs):
+            orig_init(self, model_runner, *args, **kwargs)
+            if _is_dominotree_server() and not self.is_draft_worker:
+                self.topk = max(int(self.topk or 0), 2)
+                self._dominotree_tree_verify = True
+                logger.info(
+                    "DOMINOTREE: GDN target backend reads tree topology in verify "
+                    "(topk gate raised to %d on this backend only).",
+                    self.topk,
+                )
+
+        _gdn_init._dominotree_wrapped = True
+        GDNAttnBackend.__init__ = _gdn_init
+
+    _HYBRID_TREE_HOOKS_INSTALLED = True
+
+
 def register_plugin() -> None:
     """Plugin entry point (invoked for side effects by SGLang's plugin loader).
 
@@ -265,6 +385,10 @@ def register_plugin() -> None:
     # requiring --disable-cuda-graph. No-op for a DOMINO server / under
     # --disable-cuda-graph. See the hook's docstring for the full rationale.
     _install_dflash_custom_mask_graph_hook()
+
+    # (5) Hybrid Gated-DeltaNet targets (Qwen3.5/3.6): make the GDN layers verify
+    # the tree as a tree. DOMINOTREE-scoped; inert for attention-only targets.
+    _install_hybrid_tree_verify_hooks()
 
     _registered = True
     logger.info(

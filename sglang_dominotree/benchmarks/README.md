@@ -25,6 +25,12 @@ methods each.
 | `domino_chain` | the Domino drafter, chain verify                        |
 | `dominotree`   | **DominoTree** — the conditional draft tree (this repo) |
 
+This page and the three subdirectories below are for the **plain-attention** targets
+(Qwen3-4B, Qwen3-8B). The **hybrid** Gated-DeltaNet target (Qwen3.6-27B, needs P9 — see
+`../README.md`) has its own generic reproduction scripts, method table (no `eagle3`
+arm; `mtp` instead), and a required losslessness gate, in
+[`qwen36_27b/README.md`](qwen36_27b/README.md).
+
 ## Prerequisites
 
 - SGLang with the `dominotree` plugin installed — see

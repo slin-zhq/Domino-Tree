@@ -31,12 +31,14 @@ benchmark.py, dominotree.py, dominotree_gpu.py   the HF research harness
                                                     DominoTree@32 + released Domino, one GPU)
   make_conditioning_ladder_table.py              …raw JSONL -> the paper's conditioning-ladder table
 sglang_dominotree/                               the SGLang plugin
-  src/dominotree_sglang/                         …algorithm registration + tree builder
-  benchmarks/{bs1,concurrency,helmet}/           …the three serving benchmarks
+  src/dominotree_sglang/                         …algorithm registration + tree builder + P9 (hybrid GDN)
+  benchmarks/{bs1,concurrency,helmet}/           …the three serving benchmarks (Qwen3-4B/8B)
+  benchmarks/qwen36_27b/                         …generic single-GPU reproduction for the 27B hybrid target
   PROVENANCE.md, verify_vendored_head.py         …copied-code manifest + copy proof
 results/raw/, results/tables_gpunative/          harness raw data + derived tables (arXiv-era Table 1)
 results/raw/tab1_4b/, results/raw/tab1_8b/       harness raw data for the CURRENT Table 1 (fused builder)
 results/serving/                                 serving raw data + the no-GPU audit (single RTX 5090)
+results/serving/qwen36_27b_h200/                 Qwen3.6-27B (hybrid target) serving raw data + its own audit
 demo/                                            side-by-side record-then-replay demo
 ```
 
@@ -285,6 +287,32 @@ Supported SGLang versions, requirements, tuning knobs, and what the plugin overr
 [`sglang_dominotree/README.md`](sglang_dominotree/README.md). The three serving benchmarks
 and the admission cap that governs the concurrency comparison:
 [`sglang_dominotree/benchmarks/README.md`](sglang_dominotree/benchmarks/README.md).
+
+### Supported targets
+
+| Target | Architecture | Tree verify | Serving data |
+| --- | --- | --- | --- |
+| Qwen3-4B, Qwen3-8B | plain attention | SGLang's stock EAGLE tree-verify, unmodified | `results/serving/` |
+| **Qwen3.6-27B** | **hybrid**: 48 Gated-DeltaNet (linear-attention/recurrent) layers + 16 full-attention layers | needs **P9** (below) | `results/serving/qwen36_27b_h200/` |
+
+A hybrid target's recurrent layers do not automatically understand a *tree* the way
+attention layers do: with SGLang's stock speculative config, the Gated-DeltaNet layers
+verify a flattened tree as one chain, so every node's recurrent state silently absorbs
+the states of every earlier node in verify order — including rejected siblings. This
+does not crash and does not depress τ, so a throughput number alone cannot catch it;
+`sglang_dominotree/src/dominotree_sglang/{__init__,worker}.py` installs **P9** (tree
+verify on hybrid Gated-DeltaNet targets) to fix this — raising the GDN backend's own
+topk gate so its Triton kernels walk parent pointers, switching to the dense per-node
+conv-window layout, and committing each accepted node's recurrent state right after
+`eagle_sample`. It activates automatically whenever the target is detected as hybrid
+GDN; there is no extra flag to turn it on, and non-GDN recurrent targets are refused
+(fails closed) rather than silently mishandled. Draft checkpoint:
+[`Huang2020/qwen3.6-27B-domino`](https://huggingface.co/Huang2020/qwen3.6-27B-domino);
+target: `Qwen/Qwen3.6-27B`. This target's own GRU input table is refused at TP>1 (it
+runs on one 141 GB H200, TP=1). Losslessness gate, headline numbers, and known
+limitations: [`results/serving/qwen36_27b_h200/README.md`](results/serving/qwen36_27b_h200/README.md).
+Clean single-GPU reproduction scripts (launcher, the three serving-axis drivers, the
+losslessness gate): [`sglang_dominotree/benchmarks/qwen36_27b/README.md`](sglang_dominotree/benchmarks/qwen36_27b/README.md).
 
 ## Results
 

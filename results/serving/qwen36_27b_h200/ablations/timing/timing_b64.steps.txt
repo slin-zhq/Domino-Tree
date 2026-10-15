@@ -1,0 +1,3 @@
+[2026-09-24 20:51:12] [DominoTree] step timing over 100 steps (ms/step): draft=2.196 build=6.921 prepare=0.648 verify=29.428 accept=0.299 commit=0.350 | sum=39.842
+[2026-09-24 20:51:15] [DominoTree] step timing over 100 steps (ms/step): draft=1.709 build=1.164 prepare=0.565 verify=29.621 accept=0.223 commit=0.216 | sum=33.498
+[2026-09-24 20:51:19] [DominoTree] step timing over 100 steps (ms/step): draft=1.710 build=1.161 prepare=0.564 verify=29.490 accept=0.224 commit=0.215 | sum=33.365

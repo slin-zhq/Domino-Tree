@@ -364,6 +364,53 @@ def _compact_accept_to_front(
     return out
 
 
+def _detect_hybrid_gdn_target(target_mr) -> bool:
+    """Is the TARGET a hybrid Gated-DeltaNet model we can tree-verify (P9)?
+
+    True for hybrid GDN targets (Qwen3.5/3.6, Qwen3-Next) once the plugin-load
+    hooks are in place; False for attention-only targets. RAISES for every other
+    case, including "cannot tell": a recurrent target verified as if it were
+    attention-only serves fluent, silently non-lossless text, so this guard must
+    fail closed. (The previous detector read attributes via ``getattr(..,
+    None)`` inside ``except Exception: False`` -- it failed OPEN.)
+    """
+    try:
+        mambaish = target_mr.mambaish_config
+        hybrid_gdn = target_mr.hybrid_gdn_config
+    except AttributeError as e:
+        raise RuntimeError(
+            "DOMINOTREE cannot determine whether the target is a Mamba/hybrid "
+            "model (ModelRunner.mambaish_config / .hybrid_gdn_config are missing "
+            "on this SGLang build). Refusing to start rather than risk verifying "
+            "recurrent layers as a flat chain."
+        ) from e
+    if mambaish is None:
+        return False
+    if hybrid_gdn is None:
+        raise NotImplementedError(
+            "DOMINOTREE supports hybrid Gated-DeltaNet targets only (Qwen3.5/3.6, "
+            f"Qwen3-Next); this target's recurrent layers are "
+            f"{type(mambaish).__name__}, whose tree-verify path is not validated. "
+            "Use --speculative-algorithm DOMINO (chain verify) instead."
+        )
+    from . import _HYBRID_DIAG_FLAT_GDN, _HYBRID_TREE_HOOKS_INSTALLED
+
+    if _HYBRID_DIAG_FLAT_GDN:
+        logger.warning(
+            "DOMINOTREE_DIAG_FLAT_GDN=1: serving a hybrid GDN target with the "
+            "GDN layers verifying trees as a flat chain. NOT LOSSLESS."
+        )
+        return True
+    if not _HYBRID_TREE_HOOKS_INSTALLED:
+        raise RuntimeError(
+            "DOMINOTREE: hybrid GDN target, but the tree-verify hooks were not "
+            "installed at plugin load (see the warning from "
+            "_install_hybrid_tree_verify_hooks). Without them the GDN layers "
+            "verify the tree as a flat chain. Refusing to start."
+        )
+    return True
+
+
 class DominoTreeWorkerV2(DominoWorkerV2):
     """DFLASH-drafter worker whose *verify* is an EAGLE tree instead of a chain.
 
@@ -392,9 +439,9 @@ class DominoTreeWorkerV2(DominoWorkerV2):
     verify only accepts argmax-matching tokens; at T>0 (P6) eagle_sample's
     tree_speculative_sampling_target_only is the distribution-preserving threshold
     sampler (draft stays greedy; only acceptance is temperature-aware). Constraints:
-    page_size==1, non-mamba target, no compact-draft-cache window, no rejection
-    sampling (greedy draft produces no draft_probs). TP>1 IS supported: the tree
-    build all-gathers a full-vocab, rank-replicated base-logits tensor per step
+    page_size==1, attention-only or hybrid-GDN target (P9), no compact-draft-cache
+    window, no rejection sampling (greedy draft produces no draft_probs). TP>1 IS
+    supported: the tree build all-gathers a full-vocab, rank-replicated base-logits tensor per step
     (``_tp_full_base_logits``), so every rank builds the same tree and the
     per-request host syncs need no cross-rank coordination. Anything else falls
     back to the lossless Domino chain.
@@ -404,7 +451,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
     so ``--disable-cuda-graph`` is OPTIONAL — kept as an eager fallback.
 
     P5 (correctness gate): unsupported configs FAIL FAST instead of running
-    silently (page_size!=1, compact draft cache, Mamba/hybrid target at
+    silently (page_size!=1, compact draft cache, non-GDN Mamba-style target at
     server level; return_logprob / grammar per request), and any chain-verify
     FALLBACK on a cuda-graph server is forced EAGER (``_chain_fallback``): the
     P4b hook captures the target-verify graph WITH a ``custom_mask_buf``, but
@@ -422,36 +469,18 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         with draft_sized_server_args(server_args, draft_block_size) as verify_nodes:
             super().__init__(*args, **kwargs)
 
-        # P5 server-level guard: Mamba/hybrid targets. Upstream's chain verify
-        # commits Mamba states after verify (dflash_worker_v2.py:1518-1521), but
-        # our tree verify path does not port commit_mamba_states_after_verify
-        # (spec_utils.py:577), so accepted-path Mamba states would silently never
-        # be committed. Detect from the target model CONFIG (hybrid_gdn_config /
-        # mamba2_config), which is available at draft-worker init — the target
-        # attn_backend is constructed LATER, so reading `.attn_backend` here
-        # AttributeErrors on the pinned build. Best-effort + fully defensive: a
-        # detection failure must never crash init for the common non-Mamba case.
-        target_mr = self.target_worker.model_runner
-        try:
-            is_mamba_target = (
-                getattr(target_mr, "hybrid_gdn_config", None) is not None
-                or getattr(target_mr, "mamba2_config", None) is not None
-            )
-            backend = getattr(target_mr, "attn_backend", None)
-            if backend is not None and hasattr(
-                backend, "update_mamba_state_after_mtp_verify"
-            ):
-                is_mamba_target = True
-        except Exception:  # detection is best-effort; never break launch
-            is_mamba_target = False
-        if is_mamba_target:
-            raise NotImplementedError(
-                "DOMINOTREE does not support Mamba/hybrid target models: the "
-                "tree verify path does not port commit_mamba_states_after_verify, "
-                "so accepted-path Mamba states would never be committed. Use a "
-                "non-Mamba target, or --speculative-algorithm DOMINO / DFLASH "
-                "(chain verify, which handles Mamba upstream)."
-            )
+        # P9 server-level guard: hybrid targets. A hybrid Gated-DeltaNet target is
+        # tree-verified correctly only when (a) its GDN layers read the tree
+        # topology and keep one conv window per node -- installed at plugin load
+        # by _install_hybrid_tree_verify_hooks -- and (b) the accepted node's
+        # recurrent state is committed after every verify (_tree_decode_forward).
+        # Every other Mamba-style target is refused. Detected from the target
+        # model CONFIG: the target attn_backend is constructed LATER, so (a) is
+        # re-checked on the live backend at the first tree verify.
+        self._hybrid_gdn_target = _detect_hybrid_gdn_target(
+            self.target_worker.model_runner
+        )
+        self._hybrid_verify_checked = False
 
         # Tree budget is independent of draft depth. Preserve the target verify
         # width while restoring the draft model's native block size.
@@ -646,6 +675,17 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             or getattr(model_worker_batch, "is_extend_in_batch", False)
             or mode.is_idle()
         )
+        if reaches_chain_verify and self._hybrid_gdn_target:
+            # The GDN backend is in tree mode for this server. Upstream's chain
+            # verify input (DFlashVerifyInput) carries no retrieve_* links, so a
+            # graph replay would walk the PREVIOUS tree's topology (the metadata
+            # buffers keep it) and an eager run would crash. Neither is lossless.
+            raise RuntimeError(
+                "DOMINOTREE on a hybrid GDN target cannot fall back to the chain "
+                "decode-verify (the GDN backend is in tree mode). This path should "
+                "be unreachable with a Domino drafter; use --speculative-algorithm "
+                "DOMINO for chain verify on this target."
+            )
         target_model_runner = self.target_worker.model_runner
         graph_runner = getattr(target_model_runner, "decode_cuda_graph_runner", None)
         if not reaches_chain_verify or graph_runner is None:
@@ -656,6 +696,62 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             return super().forward_batch_generation(model_worker_batch, on_publish)
         finally:
             target_model_runner.decode_cuda_graph_runner = graph_runner
+
+    def _assert_hybrid_tree_verify_ready(self) -> None:
+        """One-time check, at the first tree verify, that the LIVE target backend
+        is in the state P9 needs (the backend does not exist at worker init).
+
+        Each condition, if violated, silently breaks losslessness on a hybrid
+        target, so any failure refuses to serve.
+        """
+        from . import _HYBRID_DIAG_FLAT_GDN
+
+        if _HYBRID_DIAG_FLAT_GDN:
+            return  # negative control: the flat-chain verify is the point
+        target_mr = self.target_worker.model_runner
+        backend = getattr(target_mr, "attn_backend", None)
+        linear = getattr(backend, "linear_attn_backend", None)
+        problems = []
+        if linear is None:
+            problems.append("target attn_backend has no linear_attn_backend")
+        else:
+            if not getattr(linear, "_dominotree_tree_verify", False) or int(
+                getattr(linear, "topk", 0) or 0
+            ) <= 1:
+                problems.append(
+                    f"GDN backend {type(linear).__name__} does not read tree "
+                    f"topology (topk={getattr(linear, 'topk', None)})"
+                )
+            verify_kernel = getattr(
+                getattr(linear, "kernel_dispatcher", None), "verify_kernel", None
+            )
+            # Only the Triton kernel walks parent pointers; FlashInfer's MTP verify
+            # kernel is chain-only (it raises on tree metadata).
+            if type(verify_kernel).__name__ != "TritonGDNKernel":
+                problems.append(
+                    f"GDN verify kernel is {type(verify_kernel).__name__}, not "
+                    "TritonGDNKernel (launch with --linear-attn-backend triton)"
+                )
+        pool = getattr(target_mr.req_to_token_pool, "mamba_pool", None)
+        phys = getattr(pool, "_intermediate_conv_window_phys", None)
+        # Dense layout: [layers, slots, draft_tokens, dim, K-1] (5-D). The
+        # deduplicated chain-only layout stores a 4-D shared window.
+        if not phys or phys[0].dim() != 5:
+            problems.append(
+                "conv-intermediate cache uses the deduplicated chain-only layout"
+            )
+        if problems:
+            raise RuntimeError(
+                "DOMINOTREE hybrid GDN target is not set up for tree verify: "
+                + "; ".join(problems)
+                + ". Refusing to serve: the output would not be lossless."
+            )
+        logger.info(
+            "DOMINOTREE: hybrid GDN tree verify active (topk gate %d, verify kernel "
+            "%s, dense conv windows).",
+            linear.topk,
+            type(linear.kernel_dispatcher.verify_kernel).__name__,
+        )
 
     # -- draft -------------------------------------------------------------
 
@@ -1238,6 +1334,7 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             eagle_sample,
         )
         from sglang.srt.speculative.spec_utils import (
+            commit_mamba_states_after_verify,
             move_accept_tokens_to_target_kvcache,
         )
 
@@ -1330,6 +1427,10 @@ class DominoTreeWorkerV2(DominoWorkerV2):
         )
         batch.spec_info = verify_input
 
+        if self._hybrid_gdn_target and not self._hybrid_verify_checked:
+            self._assert_hybrid_tree_verify_ready()
+            self._hybrid_verify_checked = True
+
         # 6) Prepare + run target verify (EAGLE allocates the n verify slots).
         with _ph("prepare"):
             verify_forward_batch, can_run_cuda_graph = eagle_prepare_for_verify(
@@ -1363,6 +1464,18 @@ class DominoTreeWorkerV2(DominoWorkerV2):
             predict, accept_lens, accept_index = eagle_sample(
                 verify_input, batch, logits_output, None
             )
+            if self._hybrid_gdn_target:
+                # P9: the verify ran with persistent GDN state updates disabled,
+                # writing each node's conv window + SSM state to its own
+                # intermediate slot. Commit the last ACCEPTED node's slot (and the
+                # prefix-cache track point). Same call and ordering as EAGLE
+                # (eagle_worker_v2.py): after sampling, BEFORE the KV move and
+                # compaction below, which change what accept_index means.
+                # accept_index holds global node ids with per-request stride n,
+                # the draft_token_num this function expects, whatever its width.
+                commit_mamba_states_after_verify(
+                    self.target_worker, batch, accept_lens, accept_index, n
+                )
         new_seq_lens = prefix_lens + accept_lens
         if on_publish is not None:
             on_publish(new_seq_lens)

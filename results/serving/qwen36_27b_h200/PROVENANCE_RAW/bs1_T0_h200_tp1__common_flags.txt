@@ -1,0 +1,1 @@
+--model-path /work/u8093362/models/Qwen3.6-27B --tp-size 1 --trust-remote-code --attention-backend flashinfer --page-size 1 --linear-attn-backend triton --mem-fraction-static 0.80 --max-running-requests 2 --host 127.0.0.1 --port 31100 --cuda-graph-max-bs 2 

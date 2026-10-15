@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Regenerate paper Table 5 (tab:sglang-bs1) in Table 1's layout.
+"""Regenerate paper Table 5 (tab:sglang-bs1) in Table 1's layout: Qwen3-4B and Qwen3-8B
+(one RTX 5090, bs1/<size>/) and Qwen3.6-27B (one H200, qwen36_27b_h200/bs1/).
 
 The published version crammed "TPS/tau" into one cell and labelled the rollup
 "(MACRO)". This emits Table 1's structure instead -- Math/Code/Chat column groups,
@@ -21,10 +22,18 @@ DS = [("gsm8k","GSM8K"),("math500","MATH-500"),("aime25","AIME25"),
       ("mt-bench","MT-Bench"),("alpaca","Alpaca")]
 METHODS = [("eagle3","EAGLE-3"),("dflash","DFlash"),
            ("domino_chain","Domino"),("dominotree","DominoTree")]
+# Qwen3.6-27B has no EAGLE-3 checkpoint; its draft-head baseline is the model's own MTP head.
+METHODS_27B = [("mtp","MTP"),("dflash","DFlash"),
+               ("domino_chain","Domino"),("dominotree","DominoTree")]
+SIZES = [("4b","Qwen3-4B",METHODS,32),("8b","Qwen3-8B",METHODS,32),
+         ("27b","Qwen3.6-27B",METHODS_27B,15)]   # (dir, label, methods, tree budget)
 END = r" \\"
 
 def rows(root, size, method, ds, temp):
-    p = root/"results"/"serving"/"bs1"/size/method/f"{ds}_T{temp}.jsonl"
+    if size == "27b":
+        p = root/"results"/"serving"/"qwen36_27b_h200"/"bs1"/f"T{temp}"/method/f"{ds}_T{temp}.jsonl"
+    else:
+        p = root/"results"/"serving"/"bs1"/size/method/f"{ds}_T{temp}.jsonl"
     if not p.exists(): sys.exit(f"missing raw cell: {p}")
     out=[json.loads(l) for l in p.open() if l.strip()]
     if not out: sys.exit(f"empty raw cell: {p}")
@@ -71,27 +80,28 @@ def main():
         L += [r"\midrule",
               r"\multicolumn{2}{c}{Temperature = "+f"{float(temp):g}"+"} & "
               + " & ".join([r"Speedup & $\tau$"]*9)+END]
-        for size,label in [("4b","Qwen3-4B"),("8b","Qwen3-8B")]:
+        for size,label,methods,budget in SIZES:
             L += [r"\midrule", r"\multirow{4}{*}{"+label+"}"]
             ar={d:cell(root,size,"ar",d,temp)[0] for d,_ in DS}
             AR_TPS[size,temp]=(min(ar.values()), max(ar.values()))
             best={}
             for d,_ in DS+[("Overall","")]:
                 sp={};ta={}
-                for m,_n in METHODS:
+                for m,_n in methods:
                     if d=="Overall":
                         sp[m]=statistics.fmean(cell(root,size,m,x,temp)[0]/ar[x] for x,_ in DS)
                         ta[m]=statistics.fmean(cell(root,size,m,x,temp)[1] for x,_ in DS)
                     else:
                         t,u=cell(root,size,m,d,temp); sp[m]=t/ar[d]; ta[m]=u
                 best[d]=(max(sp,key=sp.get),max(ta,key=ta.get),sp,ta)
-            for m,name in METHODS:
+            for m,name in methods:
                 vs=[]
                 for d,_ in DS+[("Overall","")]:
                     bs,bt,sp,ta=best[d]
-                    f=lambda v,is_best: (r"\textbf{%.2f}" if is_best else "%.2f")%v
-                    vs += [f(sp[m],m==bs), f(ta[m],m==bt)]
-                nm = r"\textbf{DominoTree}" if m=="dominotree" else name
+                    # Bold every value that prints the same as the best (ties included).
+                    f=lambda v,top: (r"\textbf{%.2f}" if "%.2f"%v=="%.2f"%top else "%.2f")%v
+                    vs += [f(sp[m],sp[bs]), f(ta[m],ta[bt])]
+                nm = r"\textbf{DominoTree (%d)}" % budget if m=="dominotree" else name
                 L.append(" & "+nm+" & "+" & ".join(vs)+END)
     L += [r"\bottomrule", r"\end{tabular}"]
     print("\n".join(L))

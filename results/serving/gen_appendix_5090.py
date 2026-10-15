@@ -8,7 +8,7 @@ Usage:
 
 `--paper-dir` is optional and only meaningful if you have a checkout of the paper's LaTeX
 sources (not shipped in this repo) alongside this one; without it, the script still
-regenerates and prints tab:app-conc / tab:app-helmet / tab:app-helmet-8b from raw data,
+regenerates and prints tab:app-conc / tab:app-helmet from raw data,
 it just skips the byte-level diff against `sections/serving.tex`.
 
 Outputs tables even on a mismatch, reports all mismatches to stderr, exits 1 on mismatch.
@@ -32,6 +32,13 @@ import sys
 HERE = Path(__file__).resolve().parent
 METHODS = ['ar', 'eagle3', 'dflash', 'domino_chain', 'dominotree']
 NAMES = dict(zip(METHODS, ['AR', 'EAGLE-3', 'DFlash', 'Domino', 'DominoTree']))
+NAMES['mtp'] = 'MTP'
+# Qwen3.6-27B (one H200, qwen36_27b_h200/): no EAGLE-3 checkpoint exists, so the model's own
+# multi-token-prediction head (MTP) takes EAGLE-3's place, listed first after AR as in the paper.
+METHODS_27B = ['ar', 'mtp', 'dflash', 'domino_chain', 'dominotree']
+TREE_BUDGET = {'4B': 32, '8B': 32}           # concurrency tables
+HELMET_BUDGET = {'4B': 16, '8B': 16, '27B': 15}  # dominotree arm of the HELMET tables
+MODEL_NAMES = {'4B': 'Qwen3-4B', '8B': 'Qwen3-8B', '27B': 'Qwen3.6-27B'}
 DATASETS = ['gsm8k', 'mbpp', 'mt-bench']
 DS_NAMES = ['GSM8K', 'MBPP', 'MT-Bench']
 CONCS = [2, 4, 8, 16, 32]
@@ -77,11 +84,15 @@ def load_conc(size):
 
 
 def load_helmet(size):
-    """size: '4B' or '8B'. Reads results/serving/longcontext/<size-lower>/<arm>/helmet*.jsonl.
+    """size: '4B', '8B' or '27B'. Reads results/serving/longcontext/<size-lower>/<arm>/helmet*.jsonl
+    (27B: results/serving/qwen36_27b_h200/helmet/<arm>/).
     At 8B, also reads the dominotree_b32/ budget-sweep arm (labeled 'dominotree32')."""
     aggs, prompts = {}, {}
-    root = HERE / 'longcontext' / size.lower()
-    arms = [(m, root / m) for m in METHODS]
+    if size == '27B':
+        root, methods = HERE / 'qwen36_27b_h200' / 'helmet', METHODS_27B
+    else:
+        root, methods = HERE / 'longcontext' / size.lower(), METHODS
+    arms = [(m, root / m) for m in methods]
     if size == '8B':
         arms.append(('dominotree32', root / 'dominotree_b32'))
     for arm, path in arms:
@@ -179,8 +190,29 @@ def conc_table(all_conc):
                     taus = [data[m, d, c]['mean_accept'] for c in CONCS]
                     spreads.append((max(taus) - min(taus)) / st.mean(taus) * 100)
                     tau = '\\textbf{' + tau_of[m] + '}' if tau_of[m] == best_tau else tau_of[m]
-                lines.append((name if m == 'ar' else '') + ' & ' + NAMES[m] + ' & ' +
+                label = NAMES[m] + (f' ({TREE_BUDGET[size]})' if m == 'dominotree' else '')
+                lines.append((name if m == 'ar' else '') + ' & ' + label + ' & ' +
                              ' & '.join(cells) + ' & ' + tau + END)
+        # Overall: goodput averaged over the three datasets; tau over datasets and c
+        # (the Qwen3-%s rows of Table~\ref{tab:sglang-conc}).
+        lines += [r'\midrule\midrule',
+                  '\\multicolumn{%d}{c}{\\textit{Qwen3-%s -- Overall (mean of the three datasets above)}}'
+                  % (len(CONCS) + 3, size) + END, r'\midrule']
+        good = {(m, c): st.mean(data[m, d, c]['tps'] for d in DATASETS) for m in METHODS for c in CONCS}
+        taus = {m: st.mean(data[m, d, c]['mean_accept'] for d in DATASETS for c in CONCS)
+                for m in METHODS if m != 'ar'}
+        best_tau = max(f'{v:.2f}' for v in taus.values())
+        for m in METHODS:
+            cells = []
+            for c in CONCS:
+                v, top = f"{good[m, c]:.0f}", f"{max(good[mm, c] for mm in METHODS):.0f}"
+                cells.append('\\textbf{' + v + '}' if v == top else v)
+            tau = '--' if m == 'ar' else f'{taus[m]:.2f}'
+            if m != 'ar' and tau == best_tau:
+                tau = '\\textbf{' + tau + '}'
+            label = NAMES[m] + (f' ({TREE_BUDGET[size]})' if m == 'dominotree' else '')
+            lines.append(('Overall' if m == 'ar' else '') + ' & ' + label + ' & ' +
+                         ' & '.join(cells) + ' & ' + tau + END)
     out = '\n'.join(lines + table_end())
     out = out.replace(r'\resizebox{\textwidth}', r'\resizebox{0.85\textwidth}')
     return out.replace('SPREAD', f'{max(spreads):.1f}')
@@ -215,11 +247,11 @@ def helmet_tables(all_helmet):
          r'\multicolumn{2}{c}{32K}' + END,
          r'\cmidrule(lr){3-4}\cmidrule(lr){5-6}\cmidrule(lr){7-8}',
          r' & & TPS & $\tau$ & TPS & $\tau$ & TPS & $\tau$' + END])
-    for size in ['4B', '8B']:
+    for size in all_helmet:
         agg, per = all_helmet[size]
         lines += [r'\midrule',
-                  r'\multicolumn{8}{c}{\textbf{Qwen3-' + size + '}}' + END, r'\midrule']
-        arms = METHODS + (['dominotree32'] if size == '8B' else [])
+                  r'\multicolumn{8}{c}{\textbf{' + MODEL_NAMES[size] + '}}' + END, r'\midrule']
+        arms = (METHODS_27B if size == '27B' else METHODS) + (['dominotree32'] if size == '8B' else [])
         for ti, (t, name) in enumerate(zip(TASKS, TASK_NAMES)):
             if ti:
                 lines.append(r'\cmidrule(lr){1-8}')
@@ -232,7 +264,7 @@ def helmet_tables(all_helmet):
             for arm in arms:
                 label = NAMES.get(arm, 'DominoTree (32)')
                 if arm == 'dominotree':
-                    label += ' (16)'
+                    label += f' ({HELMET_BUDGET[size]})'
                 cells = []
                 for b in BINS:
                     cells += [bold(f"{agg[arm,t,b]['tps']:.1f}", btps[b]),
@@ -313,6 +345,8 @@ def claim_audit(helmet, cis):
     best = wins = significant = 0
     messages = []
     for size, (agg, _) in helmet.items():
+        if size == '27B':
+            continue  # 27B claims are audited by qwen36_27b_h200/verify_qwen36_27b.py
         arm = 'dominotree32' if size == '8B' else 'dominotree'
         for t in TASKS:
             for b in BINS:
@@ -335,8 +369,9 @@ def main():
                               'diff against sections/serving.tex. Not shipped in this repo.')
     args = parser.parse_args()
     conc = {s: load_conc(s) for s in ['4B','8B']}
-    helmet = {s: load_helmet(s) for s in ['4B','8B']}
+    helmet = {s: load_helmet(s) for s in ['4B','8B','27B']}
     helmet_tex, cis = helmet_tables(helmet)
+    helmet = {s: helmet[s] for s in ['4B','8B']}  # crosscheck/claim_audit below are 4B/8B-only
     print('% Regenerated by results/serving/gen_appendix_5090.py from raw data.')
     print(conc_table(conc))
     print(helmet_tex)

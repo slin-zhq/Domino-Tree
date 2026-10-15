@@ -123,10 +123,21 @@ subtly wrong output.
 - **`--page-size 1`** (SGLang's default). The tree verifier addresses the KV cache one
   token at a time. A page holding several tokens cannot represent a branching draft, where
   siblings diverge partway through what would be a single page.
-- **A non-hybrid target model** — no Mamba / gated-DeltaNet layers. Rejecting a draft
-  branch means rewinding the target's state to the fork point. Attention KV can be rewound
-  slot by slot; a recurrent layer's state cannot, so a rejected branch would leave the
-  model's state corrupted with nothing to detect it.
+- **A plain-attention target, OR a hybrid Gated-DeltaNet target with P9 active.**
+  Rejecting a draft branch means rewinding the target's state to the fork point.
+  Attention KV can be rewound slot by slot; a recurrent layer's state cannot on its
+  own, so an unpatched hybrid target's rejected branch would leave the model's state
+  corrupted with nothing to detect it — this used to be a hard refusal for every hybrid
+  target. **P9** (`src/dominotree_sglang/{__init__,worker}.py`) lifts it specifically
+  for Gated-DeltaNet: it raises the GDN backend's own topk gate so its Triton kernels
+  walk parent pointers, switches to the dense per-node conv-window layout, and commits
+  each accepted node's GDN state right after `eagle_sample`. It engages automatically
+  when `SGLANG_PLUGINS=dominotree` and the target is detected as hybrid GDN — no extra
+  flag. **Other recurrent architectures (Mamba, non-GDN hybrids) are still refused,
+  fails closed** — `_detect_hybrid_gdn_target` raises `NotImplementedError` rather than
+  silently running an unverified configuration. See
+  [`benchmarks/qwen36_27b/README.md`](benchmarks/qwen36_27b/README.md) for the validated
+  example (Qwen3.6-27B) and its required losslessness gate.
 
 ## Tuning knobs
 
@@ -188,3 +199,6 @@ tables — single request (`bs1/`), goodput under concurrency (`concurrency/`), 
 context on HELMET (`helmet/`) — each comparing DominoTree against AR, DFlash, EAGLE-3, and
 the Domino chain under identical flags. Start at [`benchmarks/README.md`](benchmarks/README.md),
 which also covers the per-method admission cap that governs the concurrency comparison.
+[`benchmarks/qwen36_27b/`](benchmarks/qwen36_27b/) reuses those same three drivers for the
+Qwen3.6-27B hybrid target (no EAGLE-3 arm; MTP instead) and adds the losslessness gate a
+hybrid GDN target needs before P9's output can be trusted.

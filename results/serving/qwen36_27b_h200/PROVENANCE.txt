@@ -1,0 +1,167 @@
+Performance data collected 2026-09-23 to 2026-09-26 on the NCHC Nano5 cluster,
+one NVIDIA H200 (141 GB), without tensor parallelism. The diagnostic gate in
+20260923T171916Z_356641 instead used two H100 GPUs with tensor parallelism,
+GRU input table off, top-M 64. Target Qwen/Qwen3.6-27B (hybrid: 48 Gated-DeltaNet linear-attention layers + 16
+full-attention layers). SGLang commit 1adb53f14 + the dominotree plugin at
+feat/p9-hybrid-gdn @ 82ed10e (P9: tree verify on hybrid Gated-DeltaNet targets).
+
+Five methods, identical serving flags within each axis (fairness rule, same as the
+Qwen3-4B/8B bundle): `ar`, `dflash`, `domino_chain`, `dominotree`, `mtp`. There is no
+`eagle3` arm for this target -- no third-party EAGLE-3 head exists for Qwen3.6-27B, so
+`mtp` (the checkpoint's own multi-token-prediction head, served with SGLang's NEXTN
+algorithm) is the draft-head baseline instead.
+
+DominoTree config (chosen on this device by a ladder + node_topk x topM grid search,
+see ablations/ below): tree budget 15, node_topk 8, corr_topm 128,
+DOMINOTREE_BUILDER_GRU_TABLE=1 (opt-in GRU input table). This is DIFFERENT from the
+Qwen3-4B/8B bundle's budget 16/32 -- 27B's own measured optimum on this device. Chosen
+config is recorded verbatim in PROVENANCE_RAW/bs1_T0_h200_tp1__chosen_config.txt (also
+h200_followup__final_config.txt): "15 8 128". The decision was logged live:
+"[01:55:15Z] CHOSEN CONFIG = budget 15, node_topk 8, corr_topm 128" immediately before
+the main bs=1 raw/dominotree@15 collection started -- so every dominotree cell in this
+bundle (bs1, helmet, concurrency) uses this one config, not a mix of configs.
+
+Common launch flags (bs=1 and ablations; see PROVENANCE_RAW/bs1_T0_h200_tp1__common_flags.txt):
+  --model-path <Qwen3.6-27B> --tp-size 1 --trust-remote-code --attention-backend flashinfer
+  --page-size 1 --linear-attn-backend triton --mem-fraction-static 0.80
+  --max-running-requests 2 --cuda-graph-max-bs 2
+Concurrency axis instead uses --mem-fraction-static 0.85, --max-running-requests 32,
+--cuda-graph-max-bs 8 (a larger KV pool + admission cap for many in-flight requests, the
+same axis-dependent MEMFRAC/CGMAXBS split the Qwen3-4B/8B bundle documents).
+DominoTree/domino_chain add SGLANG_PLUGINS=dominotree plus, for dominotree only,
+DOMINOTREE_BUILDER_GRU_TABLE=1 DOMINOTREE_TREE_BUDGET=15 DOMINOTREE_NODE_TOPK=8
+DOMINOTREE_CORR_TOPM=128. MTP is launched with
+  --speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1
+  --speculative-num-draft-tokens 4
+(the model card's own recommended NEXTN config for this checkpoint's MTP head).
+
+Why P9 (tree verify on hybrid Gated-DeltaNet) is required before ANY of this data is
+trustworthy: with speculative_eagle_topk=1 (P9 off), the GDN recurrent layers never see
+the tree topology and verify the flattened tree as one chain, so every node's Gated-
+DeltaNet state absorbs the states of ALL earlier nodes in verify order, including
+rejected siblings. This does not crash and does not depress tau -- see
+losslessness_gate/ below, where the P9-off control ("dominotree_flat") keeps
+tau=9.58 (vs 9.59 for the correct tree) but silently leaves autoregressive decoding's
+own output after a MEDIAN of 46 tokens (vs 306 for dominotree, 333 for the chain). tau
+alone cannot certify correctness on a hybrid target; only a token-by-token AR diff can.
+
+------------------------------------------------------------------------------------
+bs1/  -- single-request (bs=1) serving, 8 datasets x {T=0.0, T=1.0}, n=50/dataset
+         (AIME25 n=30, MT-Bench both turns), max_new_tokens=2048.
+  T0.0: ar, domino_chain, dominotree <- SpecDec-Optimize .../nano5_27b/bs1_T0_h200_tp1/raw/
+        dflash, mtp                 <- .../nano5_27b/h200_bs1x/raw_T0.0/
+  T1.0: ar, domino_chain, dominotree <- .../nano5_27b/h200_followup/raw_T1.0/
+        dflash, mtp                 <- .../nano5_27b/h200_bs1x/raw_T1.0/
+  Source directories name the tree arm "dominotree@15"; renamed to "dominotree" here
+  to match this repo's Qwen3-4B/8B naming (the budget is stated once, above, rather
+  than encoded in every directory name).
+
+helmet/  -- HELMET long-context Summarization (infbench_sum, multi_lexsum) x
+            {8K, 16K, 32K}, n=50/cell, 1200-token generation cap, T=0.0, bs=1.
+  <- SpecDec-Optimize .../nano5_27b/h200_helmet/<method>/helmet.jsonl{,.prompts.jsonl}
+  Source file names "helmet.jsonl.prompts.jsonl" renamed to "helmet.prompts.jsonl" to
+  match the Qwen3-4B/8B bundle's convention.
+
+concurrency/  -- goodput as offered concurrency rises: gsm8k:128, mbpp:128,
+                 mt-bench:80 prompts x concurrency {1,2,4,8,16,32}, 512 new tokens,
+                 T=0.0. Each method boots at its own highest crash-free admission cap
+                 from {32,16,8} (recorded in admission_cap.txt); all five reached 32 on
+                 this 141 GB card, so every column is a like-for-like comparison at
+                 every measured concurrency.
+  <- SpecDec-Optimize .../nano5_27b/h200_conc/<method>/
+
+ablations/
+  budget_ladder/     DominoTree at tree budget {8,12,15,32,64} (fixed node_topk=8;
+                      topM=64 for the {15,32,64} sweep launched with the pre-grid
+                      default, topM=128 for the {8,12} sweep launched after the grid
+                      chose topM=128 -- both are genuinely different configs, kept
+                      separate rather than silently merged; see summary_default_kM.txt
+                      / summary_followup_k8m128.txt). Optimum is budget 15: throughput
+                      falls faster below 15 than the round gets cheaper, while tau rises
+                      past it. <- .../bs1_T0_h200_tp1/ladder/ (b15,b32,b64 + summary)
+                      and .../h200_followup/ladder/ (b8,b12 + summary).
+  node_topk_topm_grid/  node_topk x topM grid at fixed budget=15: k in {4,8,16}, M in
+                      {32,64,128,0} (M=0 = full vocabulary, no top-M restriction). 11 of
+                      12 combinations were run (k8/M64 missing -- it is the ladder's own
+                      "default" row, already covered by summary_default_kM.txt above).
+                      k8/M128 (342.2 tok/s, tau 9.61) is the best cell and was adopted as
+                      the bundle-wide DominoTree config. Full-vocabulary top-M (M=0) is
+                      never better and is markedly slower at every k (248.6-257.3 tok/s
+                      vs 334.8-342.2), confirming node_topk/topM are throughput knobs,
+                      not accuracy knobs, on this target too.
+                      <- .../bs1_T0_h200_tp1/ladder/dominotree_b15_k*_m*.{jsonl,verdict.txt}
+                      + grid_summary.txt (columns: budget, node_topk, topM, tok/s, tau,
+                      P9 gate verdict).
+  timing/             Per-phase step timing (draft/build/prepare/verify/accept/commit,
+                      ms/step) at tree budget {8,15,32,64}, over 100 decode steps per
+                      sample. Verify cost grows with budget: 18.056, 22.068, and 29.513
+                      ms/step at budgets 15, 32, and 64. Build time also rises, but
+                      verification dominates the round; its growth outpaces the
+                      acceptance gain. These means include the initial logged window
+                      and are reproduced by gen_qwen36_27b_tables.py ablation.
+                      <- .../h200_followup/timing/timing_b{8,15,32,64}.{jsonl,steps.txt}
+  Every ladder and grid cell's .verdict.txt is a per-prompt P9 losslessness check
+  (agreement with a domino/dominotree/dominotree_flat run over the same gate prompts,
+  same methodology as losslessness_gate/ below) -- every logged cell in this bundle is
+  P9_GATE=PASS; none of the ablation throughput numbers come from a config that was
+  never checked for correctness.
+
+losslessness_gate/
+  20260923T171916Z_356641/   The gate run that produced the PASS decision reported in
+      the paper and in docs/nano5/HANDOFF_27B.md: reference = domino (chain), candidate
+      = dominotree (P9 on), control = dominotree_flat (P9 off,
+      DOMINOTREE_DIAG_FLAT_GDN=1 -- the negative control, diagnostic only, never used
+      for a throughput claim). 20 prompts (5 each from gsm8k, humaneval, mt-bench,
+      math500), T=0.0, max_new_tokens up to 1024, token-by-token comparison against AR.
+      Decision rule fixed BEFORE this run (see the module docstring reproduced in
+      docs/): candidate median agreement >= 0.5x reference's AND candidate full-match
+      rate >= reference's - 0.20 AND control is clearly worse (has power). Result:
+      domino median=333 full=0.50; dominotree median=306 full=0.50; dominotree_flat
+      median=46 full=0.05. P9_GATE=PASS.
+      <- SpecDec-Optimize .../nano5_27b/p9_gate/20260923T171916Z_356641/
+      (the other p9_gate/ subdirectory, 20260923T171819Z_356634, was a 7-second job
+      that failed before the server started -- a missing g++ on that compute node,
+      fixed for every later job -- and is NOT included here; it has no gate data.)
+  gate_ref/   ar.jsonl, domino.jsonl -- the same fixed prompt set's AR and domino-chain
+      token-id outputs, re-collected on the H200 (rather than reused from an older
+      device) so every later ablation's per-config .verdict.txt in ablations/ compares
+      against a same-hardware, same-software reference.
+      <- .../bs1_T0_h200_tp1/gate_ref/
+
+PROVENANCE_RAW/   Machine-generated config/environment records, copied verbatim:
+  chosen_budget.txt, chosen_config.txt, common_flags.txt, final_config.txt (see above),
+  and provenance/ (pip freeze, `nvcc`/stack versions, and the two deviations from the
+  RTX 5090 stack this project's Qwen3-4B/8B bundle used -- sgl-deep-gemm removed
+  because its CUDA-13 runtime crashes under driver 550, and torchao repinned to the
+  PyPI build to match the 5090 freeze exactly; neither affects a bf16-only, non-DeepSeek
+  target like Qwen3.6-27B).
+
+Server + driver logs (full ServerArgs dumps, no secrets -- api_key/admin_api_key are
+None in every dump -- and per-request progress) are NOT shipped in this bundle: this
+repo's .gitignore excludes `logs/`, `*.log`, and `results/**/logs/` repo-wide, and the
+Qwen3-4B/8B bundle this one otherwise mirrors ships none either. The flags they would
+document are already captured, verbatim, in PROVENANCE_RAW/ above (chosen_config.txt,
+common_flags.txt, final_config.txt, provenance/) and in this file. The raw logs
+themselves live in SpecDec-Optimize's `results/domino_tree_sglang_integration/
+nano5_27b/*/logs/` if anyone needs the byte-for-byte server console output.
+
+------------------------------------------------------------------------------------
+What is intentionally NOT in this bundle (and why):
+
+- `_contaminated_20260925/` and the `h200_bs1x`/`h200_conc`/`h200_helmet` cells its
+  CONTAMINATION_NOTE.txt flags as contaminated: on 2026-09-25 two collection jobs
+  landed on the same compute node and reused the same fixed port (31300); each one's
+  stop-server step killed-by-port-pattern and each health check accepted the other
+  job's server, so for about 2h20m the two drivers queried each other's servers
+  (proof: a "dominotree" cell showing the tau of "mtp"). All data used in this bundle
+  is from the RE-RUN after the fix (per-job port = 20000 + SLURM job id % 20000, and a
+  PID-scoped server kill instead of a port-pattern pkill -- see start_server/
+  stop_server in the source scripts, ported into this repo's own generic launcher).
+- `bs1_T0_r1_hf/` -- an earlier H100/TP=2 collection, a different GPU (not the paper's
+  single-H200/TP=1 configuration) and a different (HF in-process, not SGLang-served)
+  harness; not comparable to anything else in this bundle.
+- `helmet_src/` (41 MB) -- the HELMET Summarization source examples before this
+  model's chat template is applied. Not re-shipped here: it is regenerated the same way
+  as the Qwen3-4B/8B bundle's, from HELMET's own loaders
+  (benchmarks/helmet/helmet_source_dump.py) plus this model's chat template
+  (benchmarks/helmet/helmet_prep.py) -- see benchmarks/qwen36_27b/README.md.

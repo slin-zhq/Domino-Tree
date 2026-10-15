@@ -1,0 +1,26 @@
+prompt                     domino         dominotree    dominotree_flat
+gsm8k/0                   291/318            291/318             22/286
+gsm8k/1                         =                  =             83/345
+gsm8k/2                   199/463            199/463             16/430
+gsm8k/3                         =            462/491             18/381
+gsm8k/4                         =                  =             27/374
+humaneval/0                     =                  =            104/140
+humaneval/1                     =                  =                  =
+humaneval/2                     =                  =            293/443
+humaneval/3               186/326            186/372            185/301
+humaneval/4                     =                  =            253/381
+mt-bench/0                      =                  =                  =
+mt-bench/1                      =             30/210             6/1024
+mt-bench/2                 80/546             80/754               4/17
+mt-bench/3                 83/857             83/861            10/1024
+mt-bench/4                      =            131/174             95/175
+math500/0                870/1024                  =            57/1024
+math500/1                 64/1024            64/1024            50/1024
+math500/2                       =                  =            38/1024
+math500/3                 612/627            612/627            233/603
+math500/4                       =                  =            42/1004
+
+domino           n=20 median_agree=  310.0 mean_agree=  363.8 full_match=0.60 mean_tau=9.20
+dominotree       n=20 median_agree=  310.0 mean_agree=  358.0 full_match=0.50 mean_tau=8.57
+dominotree_flat  n=20 median_agree=   46.0 mean_agree=   93.8 full_match=0.10 mean_tau=9.58
+P9_GATE=PASS

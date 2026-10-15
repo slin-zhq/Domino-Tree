@@ -13,6 +13,10 @@
 #   5  Figure 1 (drawn from step 4's cells.json)
 #   6  Tables 3, 4, 10, 11, 12, 13, and the Qwen3-8B budget sweep quoted in Setup + Limitations
 #   7  Table 15: conditioning ladder (tau, Qwen3-4B and Qwen3-8B)
+#   8  Qwen3.6-27B (one H200): its rows in the bs=1, concurrency and long-context serving tables,
+#      the HELMET and concurrency appendix tables, the tuning table, and the 27B row of the
+#      long-context tree-budget table, all from results/serving/qwen36_27b_h200/ (its own cell
+#      audit, separate from step 1's Qwen3-4B/8B verifier)
 set -euo pipefail
 cd "$(dirname "$0")"
 OUT=results/reproduced
@@ -30,4 +34,8 @@ echo "== 5. Figure 1 ==";               python3 gen_figure1.py "$OUT/table1/cell
 echo "== 6. builder + ablation tables =="; python3 gen_ablation_tables.py --out-dir "$OUT/ablations" | tail -1
 echo "== 7. Table 15 ==";
 python3 results/conditioning_ladder/gen_ladder_table.py > "$OUT/table15_ladder.tex" && echo "wrote $OUT/table15_ladder.tex"
+echo "== 8. Qwen3.6-27B serving cells + tables ==";
+python3 results/serving/qwen36_27b_h200/verify_qwen36_27b.py | tail -1
+python3 results/serving/qwen36_27b_h200/gen_qwen36_27b_tables.py all > "$OUT/qwen36_27b_tables.tex" \
+  && echo "wrote $OUT/qwen36_27b_tables.tex"
 echo "ALL STEPS COMPLETED -- compare $OUT/ against the paper's tables."

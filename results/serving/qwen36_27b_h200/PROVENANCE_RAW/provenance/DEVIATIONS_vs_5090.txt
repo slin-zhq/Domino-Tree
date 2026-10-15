@@ -1,0 +1,7 @@
+2026-09-23T16:43:50Z removed sgl-deep-gemm==0.1.3. Why: its _C.so links libcudart.so.13 (CUDA 13), which
+  driver 550 (CUDA 12.4) cannot run. On the 5090 (sm_120) SGLang never imported it:
+  deep_gemm_wrapper/configurer.py returns False for sm_version == 120 BEFORE the import. On H100
+  (sm_90) it imports it and crashes. With it absent, the import raises ImportError, so
+  ENABLE_JIT_DEEPGEMM=False: the same DeepGEMM-off state the 5090 ran in. DeepGEMM is used only by
+  FP8 GEMMs and DeepSeek-specific attention (dsa/dsv4/mhc); Qwen3.6-27B bf16 uses none.
+2026-09-23T16:43:50Z torchao 0.17.0+cu129 -> 0.17.0 (PyPI), to match the 5090 freeze exactly.
